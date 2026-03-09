@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import copy
 import datetime as dt
+import hashlib
 import hmac
 import json
 import os
@@ -50,11 +51,15 @@ HTML = """<!doctype html>
     .row{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
     .actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
     button{border:1px solid #334155;background:#111827;color:#e5e7eb;border-radius:10px;padding:8px 12px;cursor:pointer}
-    button.primary{background:#0f5132;border-color:#166534}
+    button.primary{background:#0b3b75;border-color:#1d4ed8}
     button.secondary{background:#4a1d1d;border-color:#991b1b}
+    button.accent{background:#0b3b75;border-color:#1d4ed8}
+    button.destructive{background:#4a1d1d;border-color:#dc2626}
     button:disabled{opacity:.45;cursor:not-allowed}
     input,select{background:#020617;color:#e5e7eb;border:1px solid #334155;border-radius:8px;padding:6px 8px}
     input{width:80px}
+    input[type="checkbox"]{width:auto;margin:0}
+    .check-label{display:flex;align-items:center;gap:6px}
     #cost_year{width:130px}
     .busy{color:#60a5fa}
     .activity{min-height:16px}
@@ -114,7 +119,7 @@ HTML = """<!doctype html>
 	      <div class=\"actions\" style=\"margin-top:8px\">
         <label class=\"small\">Override hours:</label>
         <input id=\"hours\" type=\"number\" min=\"0.25\" step=\"0.25\" value=\"1\" />
-        <button id=\"btn_peak\" class=\"primary\" onclick=\"switchProfile('peak')\" disabled>Switch to On Peak (500 Mbps)</button>
+        <button id=\"btn_peak\" class=\"accent\" onclick=\"switchProfile('peak')\" disabled>Switch to On Peak (500 Mbps)</button>
         <button id=\"btn_off\" class=\"secondary\" onclick=\"switchProfile('off_peak')\" disabled>Switch to Off Peak (100 Mbps)</button>
         <button id=\"btn_clear\" onclick=\"clearOverride()\" disabled>Clear Override</button>
 	      </div>
@@ -166,7 +171,8 @@ HTML = """<!doctype html>
         <div class="actions" style="margin-top:8px">
           <label class="small">Year</label>
           <select id="cost_year"></select>
-          <button id="btn_refresh_cost" onclick="loadCostAnalytics(true)">Refresh Cost Data</button>
+          <button id="btn_refresh_cost" class="primary" onclick="loadCostAnalytics(true)">Refresh Cost Data</button>
+          <button id="btn_clear_cost_cache" class="destructive" onclick="clearCostCache()">Clear Cost Cache</button>
         </div>
         <div class="small chart-note" id="cost_meta">Loading cost analytics...</div>
       </div>
@@ -191,10 +197,10 @@ HTML = """<!doctype html>
           <div><label class="small">Log File</label><input id="cfg_log_file" type="text" style="width:100%" placeholder="./lumen-scheduler.log" /></div>
         </div>
         <div class="actions" style="margin-top:10px">
-          <label class="small"><input id="cfg_logging_enabled" type="checkbox" /> Logging Enabled</label>
-          <label class="small"><input id="cfg_sensitive_logs" type="checkbox" /> Include Sensitive Logs</label>
-          <label class="small"><input id="cfg_debug_enabled" type="checkbox" /> Show Debug Button</label>
-          <button id="btn_save_config" class="primary" onclick="saveConfig()">Save Configuration</button>
+          <label class="small check-label"><input id="cfg_logging_enabled" type="checkbox" /> Logging Enabled</label>
+          <label class="small check-label"><input id="cfg_sensitive_logs" type="checkbox" /> Include Sensitive Logs</label>
+          <label class="small check-label"><input id="cfg_debug_enabled" type="checkbox" /> Show Debug Button</label>
+          <button id="btn_save_config" class="primary" onclick="saveConfig()" disabled>Save Configuration</button>
         </div>
         <div class="small" id="cfg_msg" style="margin-top:8px"></div>
       </div>
@@ -212,7 +218,7 @@ HTML = """<!doctype html>
         </div>
         <div id="rule_list" class="rule-list"></div>
         <div class="actions" style="margin-top:8px">
-          <button id="btn_save_rules" class="primary" onclick="saveConfig()">Save Schedule + Configuration</button>
+          <button id="btn_save_rules" class="primary" onclick="saveConfig()" disabled>Save Schedule + Configuration</button>
         </div>
         <div class="small" id="rules_msg" style="margin-top:8px"></div>
       </div>
@@ -225,10 +231,10 @@ HTML = """<!doctype html>
           <select id="peak_bw"></select>
           <label class="small">Off Peak:</label>
           <select id="off_bw"></select>
-          <button id="btn_save_bw2" onclick="saveBandwidthProfiles()" disabled>Save Bandwidth Profiles</button>
+          <button id="btn_save_bw2" class="primary" onclick="saveBandwidthProfiles()" disabled>Save Bandwidth Profiles</button>
         </div>
         <div class="actions" style="margin-top:8px">
-          <button id="btn_fetch_bw" onclick="loadBandwidthOptions()">Fetch Bandwidth Profiles</button>
+          <button id="btn_fetch_bw" class="accent" onclick="loadBandwidthOptions()">Fetch Bandwidth Profiles</button>
         </div>
         <div class="small" id="bw_msg" style="margin-top:8px"></div>
       </div>
@@ -236,9 +242,9 @@ HTML = """<!doctype html>
       <div class="card" style="margin-top:10px">
         <div class="label">Cron Management</div>
         <div class="actions" style="margin-top:8px">
-          <button id="btn_refresh_cron" onclick="refreshCron()">Refresh Cron</button>
+          <button id="btn_refresh_cron" class="accent" onclick="refreshCron()">Refresh Cron</button>
           <button id="btn_install_managed_cron" onclick="installManagedCron()">Install Managed Cron</button>
-          <button id="btn_remove_managed_cron" onclick="removeManagedCron()">Remove Managed Cron</button>
+          <button id="btn_remove_managed_cron" class="destructive" onclick="removeManagedCron()">Remove Managed Cron</button>
         </div>
         <div id="cron_install_fields" class="actions" style="margin-top:8px">
           <label class="small">Interval (minutes)</label>
@@ -269,6 +275,7 @@ HTML = """<!doctype html>
   let currentView = 'dashboard';
   let selectedCostYear = '';
   let lastBandwidthConfig = { peak: '', off_peak: '' };
+  let configSnapshot = null;
   let bootstrapped = false;
   let startupRan = false;
   const spinnerFrames = ['|','/','-','\\\\'];
@@ -358,7 +365,7 @@ HTML = """<!doctype html>
             <input data-rule-start="${idx}" type="text" style="width:72px" value="${escHtml(String(tr.start || '08:00'))}" placeholder="08:00" />
             <label class="small">End (24h)</label>
             <input data-rule-end="${idx}" type="text" style="width:72px" value="${escHtml(String(tr.end || '17:00'))}" placeholder="17:00" />
-            <button onclick="removeRuleRow(${idx})">Remove</button>
+            <button class="destructive" onclick="removeRuleRow(${idx})">Remove</button>
           </div>
           <div class="day-grid">${ruleDaysHtml(idx, Array.isArray(r.days) ? r.days : [])}</div>
         </div>
@@ -386,6 +393,57 @@ HTML = """<!doctype html>
     }
     return out;
   }
+  function normalizeRules(rules){
+    const list = Array.isArray(rules) ? rules : [];
+    return list.map((r, idx) => {
+      const rr = r || {};
+      const tr = (Array.isArray(rr.time_ranges) && rr.time_ranges[0]) ? rr.time_ranges[0] : {};
+      const days = Array.isArray(rr.days) ? rr.days.map((d) => String(d).toLowerCase()).filter((d) => dayOptions.includes(d)) : [];
+      return {
+        name: String(rr.name || `Rule ${idx + 1}`).trim(),
+        profile: String(rr.profile || 'peak'),
+        days: Array.from(new Set(days)),
+        time_ranges: [{start: String(tr.start || '08:00'), end: String(tr.end || '17:00')}]
+      };
+    });
+  }
+  function getConfigDraft(){
+    return {
+      timezone: byId('cfg_timezone') ? String(byId('cfg_timezone').value || '').trim() : '',
+      service_id: byId('cfg_service_id') ? String(byId('cfg_service_id').value || '').trim() : '',
+      log_file: byId('cfg_log_file') ? String(byId('cfg_log_file').value || '').trim() : '',
+      logging_enabled: byId('cfg_logging_enabled') ? Boolean(byId('cfg_logging_enabled').checked) : false,
+      include_sensitive_logs: byId('cfg_sensitive_logs') ? Boolean(byId('cfg_sensitive_logs').checked) : false,
+      debug_enabled: byId('cfg_debug_enabled') ? Boolean(byId('cfg_debug_enabled').checked) : false,
+      default_profile: byId('cfg_default_profile') ? String(byId('cfg_default_profile').value || 'off_peak') : 'off_peak',
+      rules: normalizeRules(collectRulesFromEditor())
+    };
+  }
+  function sameJson(a,b){
+    return JSON.stringify(a) === JSON.stringify(b);
+  }
+  function syncConfigButtons(){
+    const draft = getConfigDraft();
+    const snap = configSnapshot || draft;
+    const rulesChanged = !sameJson(draft.rules, snap.rules || []);
+    const configChanged = (
+      draft.timezone !== (snap.timezone || '') ||
+      draft.service_id !== (snap.service_id || '') ||
+      draft.log_file !== (snap.log_file || '') ||
+      draft.logging_enabled !== Boolean(snap.logging_enabled) ||
+      draft.include_sensitive_logs !== Boolean(snap.include_sensitive_logs) ||
+      draft.debug_enabled !== Boolean(snap.debug_enabled) ||
+      draft.default_profile !== (snap.default_profile || 'off_peak') ||
+      rulesChanged
+    );
+    const saveConfigBtn = byId('btn_save_config');
+    if(saveConfigBtn){ saveConfigBtn.disabled = !configChanged; }
+    const saveRulesBtn = byId('btn_save_rules');
+    if(saveRulesBtn){
+      const hasRules = draft.rules.length > 0;
+      saveRulesBtn.disabled = !hasRules || !rulesChanged;
+    }
+  }
   function addRuleRow(){
     const existing = collectRulesFromEditor();
     existing.push({
@@ -395,10 +453,12 @@ HTML = """<!doctype html>
       time_ranges: [{start:'08:00', end:'17:00'}]
     });
     renderRuleList(existing);
+    syncConfigButtons();
   }
   function removeRuleRow(idx){
     const existing = collectRulesFromEditor().filter((_r, i) => i !== idx);
     renderRuleList(existing);
+    syncConfigButtons();
   }
 	  function bandwidthToMbps(v){
 	    const raw = String(v || '').trim();
@@ -441,6 +501,31 @@ HTML = """<!doctype html>
     if(result === 'skip') return 'warn';
     if(result === 'error') return 'bad';
     return '';
+  }
+  function cronSummary(line){
+    const raw = String(line || '').trim();
+    if(!raw){ return 'cron: installed'; }
+    const m = raw.match(/\*\/(\d+)\s+\*\s+\*\s+\*\s+\*/);
+    if(m){ return `cron: installed (every ${m[1]} min)`; }
+    const m2 = raw.match(/(\d+)\s+\*\s+\*\s+\*\s+\*/);
+    if(m2){ return `cron: installed (minute ${m2[1]} hourly)`; }
+    return 'cron: installed (custom schedule)';
+  }
+  function updateCronCard(available, hasAnyJobs, line){
+    const cronEl = document.getElementById('cron');
+    if(!cronEl){ return; }
+    if(!available){
+      cronEl.textContent = 'cron: unavailable';
+      cronEl.title = '';
+      return;
+    }
+    if(hasAnyJobs){
+      cronEl.textContent = cronSummary(line || '');
+      cronEl.title = String(line || '');
+      return;
+    }
+    cronEl.textContent = 'cron: not installed';
+    cronEl.title = '';
   }
   function schedulePoll(ms){
     if(pollTimer){ clearTimeout(pollTimer); }
@@ -584,7 +669,7 @@ HTML = """<!doctype html>
     schedulePoll(1000);
   }
   function setBusy(isBusy, text='', keepTestEnabled=true){
-    for(const id of ['btn_peak','btn_off','btn_clear','btn_off_until','btn_save_config','btn_fetch_bw','btn_save_bw2','btn_install_managed_cron','btn_remove_managed_cron','btn_refresh_cron','btn_refresh_cost','btn_add_rule','btn_save_rules']){
+    for(const id of ['btn_peak','btn_off','btn_clear','btn_off_until','btn_save_config','btn_fetch_bw','btn_save_bw2','btn_install_managed_cron','btn_remove_managed_cron','btn_refresh_cron','btn_refresh_cost','btn_clear_cost_cache','btn_add_rule','btn_save_rules']){
       const el = document.getElementById(id);
       if(el){ el.disabled = isBusy; }
     }
@@ -707,7 +792,7 @@ HTML = """<!doctype html>
     document.getElementById('rule').textContent = 'rule: ' + fmt(d.current_rule) + ' (base: ' + friendlyProfile(d.base_profile) + ')';
     document.getElementById('sched_bw').textContent = fmt(d.current_bandwidth);
     document.getElementById('live_status').textContent = fmt(d.live_status || d.live_error || '-');
-    document.getElementById('live_bw').innerHTML = 'live bandwidth: <span class="ok">' + escHtml(fmt(d.live_bandwidth)) + '</span> (mapped: ' + escHtml(friendlyProfile(d.live_profile)) + ')';
+    document.getElementById('live_bw').innerHTML = 'Current Bandwidth: <span class="ok">' + escHtml(fmt(d.live_bandwidth)) + '</span> (mapped: ' + escHtml(friendlyProfile(d.live_profile)) + ')';
     const hint = document.getElementById('live_hint');
     if((d.live_status || '').toLowerCase() === 'change pending'){
       hint.textContent = 'Lumen accepted the change and is still applying it. This can take several minutes.';
@@ -732,7 +817,9 @@ HTML = """<!doctype html>
     lastResult.textContent = 'result: ' + fmt(d.last_run_result);
     lastResult.className = 'small ' + colorResult(d.last_run_result);
     document.getElementById('last_applied').textContent = 'Last change applied: ' + fmtPST(d.last_applied_at);
-    document.getElementById('cron').textContent = d.cron_installed ? ('cron: ' + d.cron_line) : 'cron: not installed';
+    const cronEl = document.getElementById('cron');
+    cronEl.textContent = d.cron_installed ? cronSummary(d.cron_line) : 'cron: not installed';
+    cronEl.title = d.cron_installed ? String(d.cron_line || '') : '';
     if(d.month_to_date_cost && typeof d.month_to_date_cost === 'object'){
       var cost = d.month_to_date_cost || {};
       var total = (typeof cost.total_cost_usd === 'number') ? ('$' + cost.total_cost_usd.toFixed(2)) : 'n/a';
@@ -829,6 +916,19 @@ HTML = """<!doctype html>
       byId('cost_meta').className = 'small bad chart-note';
       byId('cost_chart').innerHTML = '<text x=\"20\" y=\"130\" fill=\"#ef4444\" font-size=\"14\">Cost analytics unavailable.</text>';
       byId('cost_rows').textContent = 'No cost rows.';
+    }
+  }
+  async function clearCostCache(){
+    try{
+      const payload = await api('/api/cost-analytics/clear-cache', 'POST', {}, 'Clearing Cost Cache');
+      const note = payload && payload.message ? payload.message : 'Cost cache cleared.';
+      byId('cost_meta').textContent = note + ' Refreshing cost analytics...';
+      byId('cost_meta').className = 'small chart-note';
+      await loadCostAnalytics(true);
+    } catch (e){
+      const msg = (e && e.message) ? e.message : String(e);
+      byId('cost_meta').textContent = 'Failed to clear cost cache: ' + msg;
+      byId('cost_meta').className = 'small bad chart-note';
     }
   }
   // Safe default before first live status: only API test enabled.
@@ -1001,6 +1101,17 @@ HTML = """<!doctype html>
       rmsg.textContent = `Loaded ${Array.isArray(cfg.rules) ? cfg.rules.length : 0} rule(s).`;
       rmsg.className = 'small ok';
     }
+    configSnapshot = {
+      timezone: cfg.timezone || 'America/Los_Angeles',
+      service_id: cfg.service_id || '',
+      log_file: cfg.log_file || './lumen-scheduler.log',
+      logging_enabled: Boolean(cfg.logging_enabled),
+      include_sensitive_logs: Boolean(cfg.include_sensitive_logs),
+      debug_enabled: Boolean(cfg.debug_enabled),
+      default_profile: cfg.default_profile || 'off_peak',
+      rules: normalizeRules(cfg.rules || [])
+    };
+    syncConfigButtons();
     setDebugEnabled(Boolean(cfg.debug_enabled));
   }
   async function preloadBandwidthFromConfig(){
@@ -1039,7 +1150,7 @@ HTML = """<!doctype html>
         default_profile: document.getElementById('cfg_default_profile').value,
         rules: rules
       };
-      const res = await api('/api/config', 'POST', payload, 'Saving configuration');
+      const res = await api('/api/config', 'POST', payload, 'Saving configuration', true);
       const msg = document.getElementById('cfg_msg');
       msg.textContent = res.message || 'Configuration saved.';
       msg.className = 'small ' + (res.ok ? 'ok' : 'bad');
@@ -1048,6 +1159,8 @@ HTML = """<!doctype html>
         rmsg.textContent = res.message || 'Rules saved.';
         rmsg.className = 'small ' + (res.ok ? 'ok' : 'bad');
       }
+      configSnapshot = getConfigDraft();
+      syncConfigButtons();
       setDebugEnabled(Boolean(payload.debug_enabled));
     } catch (e){
       const msg = document.getElementById('cfg_msg');
@@ -1075,6 +1188,7 @@ HTML = """<!doctype html>
       if(removeBtn){ removeBtn.disabled = true; }
       if(refreshBtn){ refreshBtn.disabled = true; }
       if(installFields){ installFields.style.display = 'none'; }
+      updateCronCard(false, false, '');
       return;
     }
     const jobs = payload.jobs || [];
@@ -1101,6 +1215,8 @@ HTML = """<!doctype html>
       msg.className = 'small';
     }
     out.textContent = jobs.map((j) => `${j.disabled ? 'DISABLED ' : ''}${j.managed ? '[managed] ' : ''}${j.line}`).join('\\n') || 'No cron jobs.';
+    const primaryJob = jobs.find((j) => !j.disabled) || jobs[0] || null;
+    updateCronCard(true, hasAny, primaryJob ? primaryJob.line : '');
   }
   async function refreshCron(){
     try{
@@ -1136,12 +1252,12 @@ HTML = """<!doctype html>
     }
   }
   async function refresh(silent=false){
-    const d = await api('/api/status', 'GET', null, 'Loading Live Status', silent);
+    const d = await api('/api/status?include_cost=0', 'GET', null, 'Loading Live Status', silent);
     renderStatus(d);
     return d;
   }
   async function refreshFresh(statusText='Checking live status...'){
-    const d = await api('/api/status?fresh=1', 'GET', null, statusText);
+    const d = await api('/api/status?fresh=1&include_cost=0', 'GET', null, statusText);
     renderStatus(d);
     return d;
   }
@@ -1163,6 +1279,14 @@ HTML = """<!doctype html>
 		      var peakEl = byId('peak_bw');
 		      var offEl = byId('off_bw');
           var costYearEl = byId('cost_year');
+          var cfgTz = byId('cfg_timezone');
+          var cfgSvc = byId('cfg_service_id');
+          var cfgLog = byId('cfg_log_file');
+          var cfgLogEn = byId('cfg_logging_enabled');
+          var cfgSens = byId('cfg_sensitive_logs');
+          var cfgDbg = byId('cfg_debug_enabled');
+          var cfgDefProf = byId('cfg_default_profile');
+          var ruleList = byId('rule_list');
 		      if(peakEl){ peakEl.addEventListener('change', syncBandwidthSaveButton); }
 		      if(offEl){ offEl.addEventListener('change', syncBandwidthSaveButton); }
           if(costYearEl){
@@ -1171,6 +1295,14 @@ HTML = """<!doctype html>
               selectedCostYear = costYearEl.value || '';
               loadCostAnalytics(false);
             });
+          }
+          for(const el of [cfgTz,cfgSvc,cfgLog,cfgLogEn,cfgSens,cfgDbg,cfgDefProf]){
+            if(el){ el.addEventListener('change', syncConfigButtons); }
+            if(el){ el.addEventListener('input', syncConfigButtons); }
+          }
+          if(ruleList){
+            ruleList.addEventListener('change', syncConfigButtons);
+            ruleList.addEventListener('input', syncConfigButtons);
           }
 		      bootstrapped = true;
 		    }
@@ -1187,7 +1319,7 @@ HTML = """<!doctype html>
         offUntil.value = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}`;
       }
 	    await preloadBandwidthFromConfig();
-	    const first = await api('/api/status?fresh=1', 'GET', null, 'Loading Live Status');
+	    const first = await api('/api/status?fast=1', 'GET', null, 'Loading Live Status');
 	    renderStatus(first);
 	    const pending = ((first.live_status || '').toLowerCase() === 'change pending');
 	    trackingChange = pending;
@@ -1196,6 +1328,10 @@ HTML = """<!doctype html>
 	      startBurstPolling(120);
 	    } else {
 	      setIdleActivity('Idle. No active change pending.');
+        // Fill in slower fields (cost + freshest live) after initial UI is ready.
+        setTimeout(() => {
+          refresh(true).catch(() => {});
+        }, 50);
 	    }
   }
   async function bootstrap(){
@@ -1229,6 +1365,8 @@ SESSION_TTL_SECONDS = 8 * 60 * 60
 DISABLED_PREFIX = "# DISABLED_BY_LUMEN_DASHBOARD "
 PROFILE_LINE_RE = re.compile(r"time=(?P<time>\S+)\s+rule=.*?\sprofile=(?P<profile>[A-Za-z0-9_-]+)")
 BILLING_CACHE: dict[str, Any] = {}
+BILLING_TOKEN_CACHE: dict[str, Any] = {}
+MONTHLY_SERIES_CACHE: dict[str, Any] = {}
 
 
 def add_api_event(endpoint: str, ok: bool, details: dict[str, Any]) -> None:
@@ -1578,6 +1716,29 @@ def _billing_cache_key(config: dict[str, Any], month_start: str, month_end: str)
     return "|".join([base_url, billing_account, service_id, month_start, month_end])
 
 
+def fetch_oauth_token_cached(
+    auth_cfg: dict[str, Any],
+    timeout: int,
+    cache_ns: str,
+    ttl_seconds: int = 1500,
+) -> str:
+    key_raw = json.dumps(auth_cfg, sort_keys=True, default=str)
+    key_hash = hashlib.sha256(key_raw.encode("utf-8")).hexdigest()
+    key = f"{cache_ns}|{key_hash}"
+    now_ts = time.time()
+    cached = BILLING_TOKEN_CACHE.get(key)
+    if cached and float(cached.get("expires_at", 0)) > (now_ts + 30):
+        token = str(cached.get("token", "")).strip()
+        if token:
+            return token
+    token = ls.fetch_token(auth_cfg, timeout=timeout)
+    BILLING_TOKEN_CACHE[key] = {
+        "token": token,
+        "expires_at": now_ts + max(60, int(ttl_seconds)),
+    }
+    return token
+
+
 def shift_year_month(year: int, month: int, delta_months: int) -> tuple[int, int]:
     idx = (year * 12 + (month - 1)) + delta_months
     new_year = idx // 12
@@ -1612,6 +1773,20 @@ def build_monthly_cost_series(
     cb = iod.setdefault("customer_bill", {})
     cb["use_service_level_breakdown"] = False
 
+    # Cache the monthly chart payload to avoid recomputing 12+ month loops repeatedly.
+    series_key = "|".join(
+        [
+            _billing_cache_key(temp_cfg, f"{end_year:04d}-{end_month:02d}-01", f"{end_year:04d}-{end_month:02d}-31"),
+            f"months={count}",
+            f"end={end_year:04d}-{end_month:02d}",
+        ]
+    )
+    series_cache_seconds = int(cb.get("series_cache_seconds", min(int(cb.get("cache_seconds", 900)), 600)))
+    now_ts = time.time()
+    cached_series = MONTHLY_SERIES_CACHE.get(series_key)
+    if allow_cache and cached_series and float(cached_series.get("expires_at", 0)) > now_ts:
+        return list(cached_series.get("value") or [])
+
     points: list[dict[str, Any]] = []
     for rel in range(-(count - 1), 1):
         y, m = shift_year_month(end_year, end_month, rel)
@@ -1621,6 +1796,10 @@ def build_monthly_cost_series(
         if isinstance(summary, dict):
             total = float(summary.get("total_cost_usd") or 0.0)
         points.append({"month": ym, "total_cost_usd": round(total, 2)})
+    MONTHLY_SERIES_CACHE[series_key] = {
+        "expires_at": now_ts + max(30, series_cache_seconds),
+        "value": points,
+    }
     return points
 
 
@@ -1660,7 +1839,7 @@ def fetch_month_to_date_cost_from_customer_bill(
     month_start = period_start.isoformat()
     month_end = period_end.isoformat()
 
-    cache_seconds = int(billing_cfg.get("cache_seconds", 300))
+    cache_seconds = int(billing_cfg.get("cache_seconds", 900))
     cache_key = _billing_cache_key(config, month_start, month_end)
     cached = BILLING_CACHE.get(cache_key)
     now_ts = time.time()
@@ -1678,7 +1857,7 @@ def fetch_month_to_date_cost_from_customer_bill(
     auth_cfg.setdefault("token_url", f"{base_url}/oauth/v2/token")
 
     try:
-        token = ls.fetch_token(auth_cfg, timeout=timeout)
+        token = fetch_oauth_token_cached(auth_cfg, timeout=timeout, cache_ns="customer_bill")
     except Exception as exc:
         return None, f"Customer Bill auth failed: {exc}"
 
@@ -1921,7 +2100,13 @@ def fetch_month_to_date_cost_from_customer_bill(
     return summary, note
 
 
-def collect_status(config_path: Path, log_path: Path, allow_cache: bool = True) -> dict[str, Any]:
+def collect_status(
+    config_path: Path,
+    log_path: Path,
+    allow_cache: bool = True,
+    include_live: bool = True,
+    include_cost: bool = False,
+) -> dict[str, Any]:
     now_utc = dt.datetime.now(dt.timezone.utc).isoformat()
     try:
         config = ls.load_config(config_path)
@@ -1932,8 +2117,22 @@ def collect_status(config_path: Path, log_path: Path, allow_cache: bool = True) 
         base_state.pop("override", None)
         base_result = ls.evaluate_with_state(config, now_local=result.now_local, state=base_state)
         cron_installed, cron_line = read_cron_block()
-        live = get_live_inventory_resilient(config, allow_cache=allow_cache)
-        mtd_cost, mtd_note = fetch_month_to_date_cost_from_customer_bill(config, allow_cache=allow_cache)
+        live: dict[str, Any]
+        if include_live:
+            live = get_live_inventory_resilient(config, allow_cache=allow_cache)
+        else:
+            live = {
+                "live_status": "",
+                "live_bandwidth": "",
+                "live_profile": "",
+                "live_warning": "Live status not requested for this refresh.",
+            }
+        mtd_cost: dict[str, Any] | None
+        mtd_note: str | None
+        if include_cost:
+            mtd_cost, mtd_note = fetch_month_to_date_cost_from_customer_bill(config, allow_cache=allow_cache)
+        else:
+            mtd_cost, mtd_note = None, ""
         return {
             "now_utc": now_utc,
             "timezone": str(config.get("timezone") or "America/Los_Angeles"),
@@ -2288,7 +2487,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/status":
             qs = parse_qs(parsed.query or "")
             allow_cache = not (qs.get("fresh", ["0"])[0] == "1")
-            payload = collect_status(self.config_path, self.log_path, allow_cache=allow_cache)
+            fast = qs.get("fast", ["0"])[0] == "1"
+            include_live = qs.get("include_live", ["1"])[0] != "0"
+            include_cost = qs.get("include_cost", ["0"])[0] != "0"
+            if fast:
+                # Fast mode prioritizes immediate UI response; cost can load in a follow-up call.
+                allow_cache = True
+                include_cost = False
+            payload = collect_status(
+                self.config_path,
+                self.log_path,
+                allow_cache=allow_cache,
+                include_live=include_live,
+                include_cost=include_cost,
+            )
             add_api_event(
                 "/api/status",
                 ok=not bool(payload.get("live_error")),
@@ -2621,6 +2833,30 @@ class Handler(BaseHTTPRequestHandler):
                             f"profile={profile}."
                         ),
                         **live,
+                    }
+                )
+                return
+
+            if parsed.path == "/api/cost-analytics/clear-cache":
+                cleared = {
+                    "billing_cache_entries": len(BILLING_CACHE),
+                    "token_cache_entries": len(BILLING_TOKEN_CACHE),
+                    "monthly_series_entries": len(MONTHLY_SERIES_CACHE),
+                }
+                BILLING_CACHE.clear()
+                BILLING_TOKEN_CACHE.clear()
+                MONTHLY_SERIES_CACHE.clear()
+                add_api_event("/api/cost-analytics/clear-cache", ok=True, details=cleared)
+                self._write_json(
+                    {
+                        "ok": True,
+                        "message": (
+                            "Cost cache cleared "
+                            f"(billing={cleared['billing_cache_entries']}, "
+                            f"tokens={cleared['token_cache_entries']}, "
+                            f"series={cleared['monthly_series_entries']})."
+                        ),
+                        "cleared": cleared,
                     }
                 )
                 return
