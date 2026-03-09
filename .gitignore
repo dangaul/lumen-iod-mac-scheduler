@@ -1,0 +1,26 @@
+.env
+config.json
+
+# Runtime state / logs
+.lumen-bandwidth-state.json
+.lumen-bandwidth-run.lock
+*.log
+
+# Build/package output
+dist/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store
+
+# Reference/sample projects (not part of this tool)
+Lumen-IoD-Scheduler-main/
+lumen_bandwidthmodifier-main/
+Lumen-IoD-Scheduler-main.zip
+lumen_bandwidthmodifier-main.zip
+*.log
+.lumen-bandwidth-state.json
+__pycache__/

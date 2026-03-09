@@ -1,0 +1,101 @@
+{
+  "timezone": "America/Los_Angeles",
+  "state_file": "./.lumen-bandwidth-state.json",
+  "logging": {
+    "enabled": true,
+    "include_sensitive": false,
+    "file": "./lumen-scheduler.log"
+  },
+  "dashboard": {
+    "auth_required": false,
+    "passphrase_env": "DASHBOARD_PASSPHRASE",
+    "debug_enabled": true
+  },
+  "default_profile": "off_peak",
+  "profiles": {
+    "peak": {
+      "bandwidth": "500 Mbps",
+      "rate_per_hour_usd": 0.79
+    },
+    "off_peak": {
+      "bandwidth": "100 Mbps",
+      "rate_per_hour_usd": 0.47
+    }
+  },
+  "rules": [
+    {
+      "name": "Mon-Thu Peak",
+      "days": ["mon", "tue", "wed", "thu"],
+      "time_ranges": [
+        {"start": "06:30", "end": "19:00"}
+      ],
+      "profile": "peak"
+    },
+    {
+      "name": "Fri Peak",
+      "days": ["fri"],
+      "time_ranges": [
+        {"start": "06:30", "end": "17:00"}
+      ],
+      "profile": "peak"
+    }
+  ],
+  "lumen_iod": {
+    "base_url": "https://api.lumen.com",
+    "customer_number": "${LUMEN_CUSTOMER_NUMBER:-YOUR_CUSTOMER_NUMBER}",
+    "service_id": "77123456789",
+    "timeout_seconds": 20,
+    "verify_after_order": false,
+    "wait_for_update_minutes": 5,
+    "source_system": "NaaS ExternalApi",
+    "product_name": "Internet On-Demand",
+    "customer_price_request_description": "Automated schedule quote request",
+    "customer_purchase_order_number": "AUTO-SCHEDULE",
+    "master_site_id": "",
+    "billing_account_id": "${LUMEN_BILLING_ACCOUNT_ID:-5-3ABCDE12}",
+    "billing_account_name": "",
+    "use_partner_id": false,
+    "partner_id": "",
+    "port_service_id": "",
+    "product_code": "718",
+    "product_spec_id": "5001",
+    "product_spec_name": "NaaS Internet",
+    "product_offering_name": "NaaS Internet",
+    "currency_code": "USD",
+    "bandwidth_options": [
+      "Backup (1 Mbps)",
+      "50 Mbps",
+      "100 Mbps",
+      "200 Mbps",
+      "500 Mbps",
+      "1 Gbps"
+    ],
+    "auth": {
+      "token_url": "https://api.lumen.com/oauth/v2/token",
+      "grant_type": "client_credentials",
+      "basic_secret": "${LUMEN_BASIC_SECRET:-}",
+      "client_id": "${LUMEN_CLIENT_ID:-}",
+      "client_secret": "${LUMEN_CLIENT_SECRET:-}",
+      "api_key": "${LUMEN_API_KEY:-}"
+    },
+    "customer_bill": {
+      "enabled": true,
+      "base_url": "https://api.lumen.com",
+      "billing_account_number": "${LUMEN_BILLING_ACCOUNT_ID:-5-3ABCDE12}",
+      "use_service_level_breakdown": true,
+      "include_all_services": false,
+      "timeout_seconds": 20,
+      "cache_seconds": 300,
+      "limit": 25,
+      "offset": 0
+    },
+    "related_contact": {
+      "number": "${LUMEN_CONTACT_NUMBER:-+14255551212}",
+      "email": "${LUMEN_CONTACT_EMAIL:-ops@example.com}",
+      "role": "${LUMEN_CONTACT_ROLE:-Order Contact}",
+      "organization": "${LUMEN_CONTACT_ORG:-Your Organization}",
+      "name": "${LUMEN_CONTACT_NAME:-Lumen Scheduler}",
+      "number_extension": ""
+    }
+  }
+}
