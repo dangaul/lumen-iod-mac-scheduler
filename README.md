@@ -2,6 +2,9 @@
 
 Simple macOS Python CLI for Lumen Internet On-Demand.
 
+Project repository:
+- [https://github.com/dangaul/lumen-iod-mac-scheduler](https://github.com/dangaul/lumen-iod-mac-scheduler)
+
 Official IoD documentation:
 - [Lumen Internet On-Demand Overview](https://developer.lumen.com/devcenter/docs/internet-on-demand/overview)
 
@@ -262,3 +265,7 @@ It excludes:
 - Runs are logged to `./lumen-scheduler.log` by default. You can set a custom path with `--log-file`.
 - `related_contact` is used for Lumen order payload contact details when values are provided.
 - Scheduler and dashboard timestamps both use `timezone` from `config.json`.
+
+## Author
+
+- Creator: Dan Gaul

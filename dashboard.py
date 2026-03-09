@@ -236,11 +236,11 @@ HTML = """<!doctype html>
       <div class="card" style="margin-top:10px">
         <div class="label">Cron Management</div>
         <div class="actions" style="margin-top:8px">
-          <button onclick="refreshCron()">Refresh Cron</button>
+          <button id="btn_refresh_cron" onclick="refreshCron()">Refresh Cron</button>
           <button id="btn_install_managed_cron" onclick="installManagedCron()">Install Managed Cron</button>
-          <button onclick="removeManagedCron()">Remove Managed Cron</button>
+          <button id="btn_remove_managed_cron" onclick="removeManagedCron()">Remove Managed Cron</button>
         </div>
-        <div class="actions" style="margin-top:8px">
+        <div id="cron_install_fields" class="actions" style="margin-top:8px">
           <label class="small">Interval (minutes)</label>
           <input id="cron_interval" type="number" min="1" max="60" step="1" value="5" />
           <label class="small">Python Bin</label>
@@ -584,7 +584,7 @@ HTML = """<!doctype html>
     schedulePoll(1000);
   }
   function setBusy(isBusy, text='', keepTestEnabled=true){
-    for(const id of ['btn_peak','btn_off','btn_clear','btn_off_until','btn_save_config','btn_fetch_bw','btn_save_bw2','btn_install_managed_cron','btn_refresh_cost','btn_add_rule','btn_save_rules']){
+    for(const id of ['btn_peak','btn_off','btn_clear','btn_off_until','btn_save_config','btn_fetch_bw','btn_save_bw2','btn_install_managed_cron','btn_remove_managed_cron','btn_refresh_cron','btn_refresh_cost','btn_add_rule','btn_save_rules']){
       const el = document.getElementById(id);
       if(el){ el.disabled = isBusy; }
     }
@@ -1064,17 +1064,29 @@ HTML = """<!doctype html>
     const msg = document.getElementById('cron_msg');
     const out = document.getElementById('cron_jobs');
     const installBtn = byId('btn_install_managed_cron');
+    const removeBtn = byId('btn_remove_managed_cron');
+    const refreshBtn = byId('btn_refresh_cron');
+    const installFields = byId('cron_install_fields');
     if(!payload.available){
       msg.textContent = 'crontab not available on this OS.';
       msg.className = 'small warn';
       out.textContent = 'No cron support detected.';
       if(installBtn){ installBtn.disabled = true; }
+      if(removeBtn){ removeBtn.disabled = true; }
+      if(refreshBtn){ refreshBtn.disabled = true; }
+      if(installFields){ installFields.style.display = 'none'; }
       return;
     }
     const jobs = payload.jobs || [];
     const hasAny = Boolean(payload.has_any_jobs);
     const hasManaged = Boolean(payload.has_managed_block);
-    if(installBtn){ installBtn.disabled = hasAny; }
+    if(installBtn){
+      installBtn.disabled = hasAny;
+      installBtn.style.display = hasAny ? 'none' : 'inline-block';
+    }
+    if(removeBtn){ removeBtn.disabled = !hasAny; }
+    if(refreshBtn){ refreshBtn.disabled = !hasAny; }
+    if(installFields){ installFields.style.display = hasAny ? 'none' : 'flex'; }
     if(hasManaged){
       msg.textContent = 'Managed cron is installed.';
       msg.className = 'small ok';
@@ -1085,7 +1097,7 @@ HTML = """<!doctype html>
       msg.textContent = 'Existing cron entries detected. Managed install is disabled to avoid conflicts.';
       msg.className = 'small warn';
     } else {
-      msg.textContent = 'No cron jobs found. You can install managed cron.';
+      msg.textContent = 'No cron jobs found. Configure interval/python then install managed cron.';
       msg.className = 'small';
     }
     out.textContent = jobs.map((j) => `${j.disabled ? 'DISABLED ' : ''}${j.managed ? '[managed] ' : ''}${j.line}`).join('\\n') || 'No cron jobs.';
