@@ -5,6 +5,8 @@ Simple macOS Python CLI for Lumen Internet On-Demand.
 Project repository:
 - [https://github.com/dangaul/lumen-iod-mac-scheduler](https://github.com/dangaul/lumen-iod-mac-scheduler)
 
+License: MIT
+
 Official IoD documentation:
 - [Lumen Internet On-Demand Overview](https://developer.lumen.com/devcenter/docs/internet-on-demand/overview)
 
