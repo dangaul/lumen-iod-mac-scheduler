@@ -50,6 +50,10 @@ If Python is missing and you use Homebrew, you can let the installer add it:
 AUTO_INSTALL_PYTHON=1 ./install_macos.sh
 ```
 
+Important:
+- Cron/scheduler jobs do **not** run while the Mac is asleep or powered off.
+- For reliable schedule enforcement, keep the Mac awake during windows when changes must occur.
+
 1. Copy config:
 
 ```bash
