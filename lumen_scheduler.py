@@ -438,13 +438,49 @@ def normalize_bandwidth_label(value: str) -> str:
     return text
 
 
+def is_placeholder_value(value: str) -> bool:
+    text = str(value or "").strip()
+    return not text or text.startswith("${") or text.upper().startswith("YOUR_")
+
+
+def inventory_service_type(iod_cfg: dict[str, Any]) -> str:
+    return str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet On-Demand").strip()
+
+
+def inventory_url(base_url: str, iod_cfg: dict[str, Any]) -> str:
+    service_type = inventory_service_type(iod_cfg)
+    return f"{base_url}/ProductInventory/v1/inventory?{parse.urlencode({'serviceType': service_type})}"
+
+
+def inventory_characteristics(inventory: dict[str, Any]) -> list[dict[str, Any]]:
+    product = inventory.get("product", {}) or {}
+    return product.get("productCharacteristic") or inventory.get("productCharacteristic") or []
+
+
+def inventory_status(inventory: dict[str, Any]) -> str:
+    product = inventory.get("product", {}) or {}
+    return str(product.get("status") or inventory.get("status") or "")
+
+
+def select_inventory_item(inv_doc: dict[str, Any], service_id: str) -> dict[str, Any] | None:
+    inventory_items = inv_doc.get("serviceInventory") or []
+    if not inventory_items:
+        return None
+    if service_id:
+        for item in inventory_items:
+            if str(item.get("serviceId", "")).strip() == service_id:
+                return item
+        return None
+    return inventory_items[0]
+
+
 def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
     iod_cfg = config.get("lumen_iod", {})
     base_url = str(iod_cfg.get("base_url", "https://api.lumen.com")).rstrip("/")
     customer_number = str(iod_cfg.get("customer_number", "")).strip()
     service_id = str(iod_cfg.get("service_id", "")).strip()
     timeout = int(iod_cfg.get("timeout_seconds", 20))
-    if not customer_number or not service_id:
+    if is_placeholder_value(customer_number) or is_placeholder_value(service_id):
         return False, "missing customer_number/service_id"
     auth_cfg = copy.deepcopy(iod_cfg.get("auth", {}))
     if not auth_cfg:
@@ -454,7 +490,7 @@ def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
         token = fetch_token(auth_cfg, timeout=timeout)
     except Exception as exc:
         return False, f"auth failed: {exc}"
-    inv_url = f"{base_url}/ProductInventory/v1/inventory?serviceId={parse.quote(service_id)}"
+    inv_url = inventory_url(base_url, iod_cfg)
     code, text = json_request(
         "GET",
         inv_url,
@@ -469,11 +505,10 @@ def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
         return False, f"inventory failed HTTP {code}"
     try:
         payload = json.loads(text)
-        items = payload.get("serviceInventory") or []
-        if not items:
-            return False, "inventory empty"
-        product = items[0].get("product", {})
-        for c in product.get("productCharacteristic", []):
+        item = select_inventory_item(payload, service_id)
+        if not item:
+            return False, f"inventory did not include serviceId {service_id}"
+        for c in inventory_characteristics(item):
             if str(c.get("name", "")).strip().lower() == "bandwidth":
                 return True, normalize_bandwidth_label(str(c.get("value", "")))
         return False, "bandwidth not found"
@@ -492,7 +527,7 @@ def apply_lumen_iod_profile(
     service_id = str(iod_cfg.get("service_id", "")).strip()
     timeout = int(iod_cfg.get("timeout_seconds", 20))
 
-    if not customer_number or not service_id:
+    if is_placeholder_value(customer_number) or is_placeholder_value(service_id):
         raise ValueError("lumen_iod.customer_number and lumen_iod.service_id are required")
 
     bandwidth_value = str(
@@ -531,7 +566,7 @@ def apply_lumen_iod_profile(
         "Accept": "application/json",
     }
 
-    inv_url = f"{base_url}/ProductInventory/v1/inventory?serviceId={parse.quote(service_id)}"
+    inv_url = inventory_url(base_url, iod_cfg)
     if dry_run:
         steps.append(
             {
@@ -545,12 +580,15 @@ def apply_lumen_iod_profile(
             }
         )
         inventory = {
+            "serviceId": service_id,
+            "status": "Active",
             "billingAccount": {
                 "id": iod_cfg.get("billing_account_id", "ACCOUNT_ID"),
                 "name": iod_cfg.get("billing_account_name", "ACCOUNT_NAME"),
             },
             "location": {"masterSiteid": iod_cfg.get("master_site_id", "MASTER_SITE_ID")},
             "locationProfile": {"dataCenter": bool(iod_cfg.get("use_partner_id", False))},
+            "productCharacteristic": [],
             "product": {"status": "Active", "productCharacteristic": []},
         }
         if iod_cfg.get("use_partner_id"):
@@ -568,10 +606,9 @@ def apply_lumen_iod_profile(
             return False, f"Inventory lookup failed HTTP {inv_code}: {inv_text}"
 
         inv_doc = json.loads(inv_text)
-        inventory_items = inv_doc.get("serviceInventory") or []
-        if not inventory_items:
-            return False, "Inventory lookup returned no serviceInventory entries"
-        inventory = inventory_items[0]
+        inventory = select_inventory_item(inv_doc, service_id)
+        if not inventory:
+            return False, f"Inventory lookup did not include serviceId {service_id}"
 
         data_center = bool(inventory.get("locationProfile", {}).get("dataCenter", False))
         if data_center:
@@ -582,8 +619,8 @@ def apply_lumen_iod_profile(
             )
             quote_identifier_key = "partnerId"
         else:
-            quote_identifier = ""
-            for item in inventory.get("product", {}).get("productCharacteristic", []):
+            quote_identifier = str(iod_cfg.get("port_service_id") or "")
+            for item in inventory_characteristics(inventory):
                 if str(item.get("name", "")).strip().lower() == "uni service id":
                     quote_identifier = str(item.get("value", "")).strip()
                     break
@@ -744,7 +781,8 @@ def apply_lumen_iod_profile(
         items = verify_doc.get("serviceInventory") or []
         if items:
             bandwidth_seen = ""
-            for ch in items[0].get("product", {}).get("productCharacteristic", []):
+            item = select_inventory_item(verify_doc, service_id) or items[0]
+            for ch in inventory_characteristics(item):
                 if str(ch.get("name", "")).strip().lower() == "bandwidth":
                     bandwidth_seen = str(ch.get("value", "")).strip()
                     break
@@ -1155,8 +1193,8 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
 def render_cron_line(script_path: Path, config_path: Path, interval_minutes: int, log_path: Path, python_bin: str) -> str:
     schedule = f"*/{interval_minutes} * * * *"
     command = (
-        f"{python_bin} {shell_quote(str(script_path))} run "
-        f"--config {shell_quote(str(config_path))} >> {shell_quote(str(log_path))} 2>&1"
+        f"{python_bin} {shell_quote(str(script_path))} "
+        f"--config {shell_quote(str(config_path))} run >> {shell_quote(str(log_path))} 2>&1"
     )
     return f"{schedule} {command}"
 

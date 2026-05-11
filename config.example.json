@@ -42,7 +42,7 @@
   ],
   "lumen_iod": {
     "base_url": "https://api.lumen.com",
-    "customer_number": "${LUMEN_CUSTOMER_NUMBER:-YOUR_CUSTOMER_NUMBER}",
+    "customer_number": "${LUMEN_CUSTOMER_NUMBER}",
     "service_id": "77123456789",
     "timeout_seconds": 20,
     "verify_after_order": false,

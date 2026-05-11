@@ -794,7 +794,10 @@ HTML = """<!doctype html>
     document.getElementById('live_status').textContent = fmt(d.live_status || d.live_error || '-');
     document.getElementById('live_bw').innerHTML = 'Current Bandwidth: <span class="ok">' + escHtml(fmt(d.live_bandwidth)) + '</span> (mapped: ' + escHtml(friendlyProfile(d.live_profile)) + ')';
     const hint = document.getElementById('live_hint');
-    if((d.live_status || '').toLowerCase() === 'change pending'){
+    if(d.live_error_detail){
+      hint.textContent = d.live_error_detail;
+      hint.className = 'small bad';
+    } else if((d.live_status || '').toLowerCase() === 'change pending'){
       hint.textContent = 'Lumen accepted the change and is still applying it. This can take several minutes.';
       hint.className = 'small warn';
     } else {
@@ -835,7 +838,7 @@ HTML = """<!doctype html>
       document.getElementById('mtd_cost').textContent = d.month_to_date_cost_note || 'Month-to-date cost unavailable via API.';
     }
     document.getElementById('override').textContent = d.override ? JSON.stringify(d.override, null, 2) : 'none';
-    document.getElementById('error').textContent = d.last_error || d.live_warning || d.live_error || 'none';
+    document.getElementById('error').textContent = d.last_error || d.live_warning || d.live_error_detail || d.live_error || 'none';
     document.getElementById('logs').textContent = d.log_tail || 'no logs yet';
     document.getElementById('schedule_readable').textContent = Array.isArray(d.schedule_lines) && d.schedule_lines.length
       ? d.schedule_lines.join('\\n')
@@ -1417,7 +1420,7 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
     base_url = str(iod_cfg.get("base_url", "https://api.lumen.com")).rstrip("/")
     customer_number = str(iod_cfg.get("customer_number", "")).strip()
     service_id = str(iod_cfg.get("service_id", "")).strip()
-    if not customer_number or not service_id:
+    if ls.is_placeholder_value(customer_number) or ls.is_placeholder_value(service_id):
         return {"live_error": "customer_number or service_id is missing"}
 
     timeout = int(iod_cfg.get("timeout_seconds", 20))
@@ -1436,7 +1439,7 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
         "x-customer-number": customer_number,
         "Accept": "application/json",
     }
-    inv_url = f"{base_url}/ProductInventory/v1/inventory?serviceId={ls.parse.quote(service_id)}"
+    inv_url = ls.inventory_url(base_url, iod_cfg)
     code, text = ls.json_request("GET", inv_url, timeout=timeout, headers=headers)
     if code < 200 or code > 299:
         detail = (text or "").strip().replace("\n", " ")
@@ -1450,14 +1453,12 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
 
     try:
         payload = json.loads(text)
-        items = payload.get("serviceInventory") or []
-        if not items:
-            return {"live_error": "inventory empty", "live_http_code": code}
-        item = items[0]
-        product = item.get("product", {})
-        status = str(product.get("status", ""))
+        item = ls.select_inventory_item(payload, service_id)
+        if not item:
+            return {"live_error": f"inventory did not include serviceId {service_id}", "live_http_code": code}
+        status = ls.inventory_status(item)
         bandwidth = ""
-        for c in product.get("productCharacteristic", []):
+        for c in ls.inventory_characteristics(item):
             if str(c.get("name", "")).strip().lower() == "bandwidth":
                 bandwidth = str(c.get("value", "")).strip()
                 break
@@ -2510,6 +2511,7 @@ class Handler(BaseHTTPRequestHandler):
                     "live_bandwidth": payload.get("live_bandwidth"),
                     "live_profile": payload.get("live_profile"),
                     "live_error": payload.get("live_error"),
+                    "live_error_detail": payload.get("live_error_detail"),
                 },
             )
             self._write_json(payload)
