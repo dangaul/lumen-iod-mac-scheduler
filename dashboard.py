@@ -196,10 +196,17 @@ HTML = """<!doctype html>
           <div><label class="small">Service ID</label><input id="cfg_service_id" type="text" style="width:100%" placeholder="77133831778" /></div>
           <div><label class="small">Log File</label><input id="cfg_log_file" type="text" style="width:100%" placeholder="./lumen-scheduler.log" /></div>
         </div>
+        <div class="row" style="margin-top:8px">
+          <div><label class="small">Pending Poll Seconds</label><input id="cfg_pending_poll_seconds" type="number" min="10" max="300" step="5" style="width:100%" /></div>
+          <div><label class="small">Pending Timeout Minutes</label><input id="cfg_pending_timeout_minutes" type="number" min="1" max="120" step="1" style="width:100%" /></div>
+          <div><label class="small">On Peak Lead Minutes</label><input id="cfg_peak_lead_minutes" type="number" min="0" max="120" step="1" style="width:100%" /></div>
+          <div><label class="small">Off Peak Lead Minutes</label><input id="cfg_off_peak_lead_minutes" type="number" min="0" max="120" step="1" style="width:100%" /></div>
+        </div>
         <div class="actions" style="margin-top:10px">
           <label class="small check-label"><input id="cfg_logging_enabled" type="checkbox" /> Logging Enabled</label>
           <label class="small check-label"><input id="cfg_sensitive_logs" type="checkbox" /> Include Sensitive Logs</label>
           <label class="small check-label"><input id="cfg_debug_enabled" type="checkbox" /> Show Debug Button</label>
+          <label class="small check-label"><input id="cfg_block_pending" type="checkbox" /> Block Changes While Pending</label>
           <button id="btn_save_config" class="primary" onclick="saveConfig()" disabled>Save Configuration</button>
         </div>
         <div class="small" id="cfg_msg" style="margin-top:8px"></div>
@@ -415,6 +422,11 @@ HTML = """<!doctype html>
       logging_enabled: byId('cfg_logging_enabled') ? Boolean(byId('cfg_logging_enabled').checked) : false,
       include_sensitive_logs: byId('cfg_sensitive_logs') ? Boolean(byId('cfg_sensitive_logs').checked) : false,
       debug_enabled: byId('cfg_debug_enabled') ? Boolean(byId('cfg_debug_enabled').checked) : false,
+      block_new_changes_while_pending: byId('cfg_block_pending') ? Boolean(byId('cfg_block_pending').checked) : true,
+      pending_poll_seconds: byId('cfg_pending_poll_seconds') ? Number(byId('cfg_pending_poll_seconds').value || '30') : 30,
+      pending_timeout_minutes: byId('cfg_pending_timeout_minutes') ? Number(byId('cfg_pending_timeout_minutes').value || '15') : 15,
+      peak_lead_minutes: byId('cfg_peak_lead_minutes') ? Number(byId('cfg_peak_lead_minutes').value || '15') : 15,
+      off_peak_lead_minutes: byId('cfg_off_peak_lead_minutes') ? Number(byId('cfg_off_peak_lead_minutes').value || '0') : 0,
       default_profile: byId('cfg_default_profile') ? String(byId('cfg_default_profile').value || 'off_peak') : 'off_peak',
       rules: normalizeRules(collectRulesFromEditor())
     };
@@ -433,6 +445,11 @@ HTML = """<!doctype html>
       draft.logging_enabled !== Boolean(snap.logging_enabled) ||
       draft.include_sensitive_logs !== Boolean(snap.include_sensitive_logs) ||
       draft.debug_enabled !== Boolean(snap.debug_enabled) ||
+      draft.block_new_changes_while_pending !== Boolean(snap.block_new_changes_while_pending) ||
+      draft.pending_poll_seconds !== Number(snap.pending_poll_seconds ?? 30) ||
+      draft.pending_timeout_minutes !== Number(snap.pending_timeout_minutes ?? 15) ||
+      draft.peak_lead_minutes !== Number(snap.peak_lead_minutes ?? 15) ||
+      draft.off_peak_lead_minutes !== Number(snap.off_peak_lead_minutes ?? 0) ||
       draft.default_profile !== (snap.default_profile || 'off_peak') ||
       rulesChanged
     );
@@ -498,7 +515,7 @@ HTML = """<!doctype html>
   }
   function colorResult(result){
     if(result === 'success') return 'ok';
-    if(result === 'skip') return 'warn';
+    if(result === 'skip' || result === 'pending') return 'warn';
     if(result === 'error') return 'bad';
     return '';
   }
@@ -645,16 +662,16 @@ HTML = """<!doctype html>
     try{
       const d = await refresh(true);
       await refreshDebug();
-      const pending = ((d && d.live_status ? d.live_status : '').toLowerCase() === 'change pending');
+      const pending = Boolean(d && d.pending_change) || ((d && d.live_status ? d.live_status : '').toLowerCase() === 'change pending');
       trackingChange = Boolean(Date.now() < burstUntil || pending);
       if(trackingChange){
         const reason = pending ? 'Waiting for Lumen to finish applying change...' : 'Verifying recent action...';
+        const pollSeconds = Math.max(10, Number((d && d.pending_poll_seconds) || 30));
         setIdleActivity(reason);
-        if(currentView === 'cost'){
-          loadCostAnalytics(false).catch(() => {});
-        }
-        schedulePoll(pending ? 3500 : 2500);
+        schedulePoll(pending ? pollSeconds * 1000 : 5000);
       } else {
+        setBusy(false, '', true);
+        renderStatus(d);
         setIdleActivity('Idle. No active change pending.');
       }
     } catch (e){
@@ -671,7 +688,7 @@ HTML = """<!doctype html>
   function setBusy(isBusy, text='', keepTestEnabled=true){
     for(const id of ['btn_peak','btn_off','btn_clear','btn_off_until','btn_save_config','btn_fetch_bw','btn_save_bw2','btn_install_managed_cron','btn_remove_managed_cron','btn_refresh_cron','btn_refresh_cost','btn_clear_cost_cache','btn_add_rule','btn_save_rules']){
       const el = document.getElementById(id);
-      if(el){ el.disabled = isBusy; }
+      if(el){ el.disabled = isBusy || (!isBusy && trackingChange && id.startsWith('btn_') && !['btn_test'].includes(id)); }
     }
     const yearSel = byId('cost_year');
     if(yearSel){ yearSel.disabled = isBusy; }
@@ -681,6 +698,10 @@ HTML = """<!doctype html>
     if(text){
       msg.textContent = text;
       msg.className = 'small busy';
+    }
+    if(!isBusy){
+      syncBandwidthSaveButton();
+      syncConfigButtons();
     }
   }
   function setActionMessage(text, isError=false){
@@ -695,12 +716,21 @@ HTML = """<!doctype html>
     const busy = (document.getElementById('action_msg').className || '').includes('busy');
     const hasLive = Boolean(d.live_status || d.live_bandwidth || d.live_profile);
     const hasOverride = Boolean(d.override);
+    const hasPending = Boolean(d.pending_change) || ((d.live_status || '').toLowerCase() === 'change pending');
     const liveScheduleMismatch = Boolean(hasLive && expected && live && expected !== live);
     const btnPeak = document.getElementById('btn_peak');
     const btnOff = document.getElementById('btn_off');
     const btnClear = document.getElementById('btn_clear');
     const btnOffUntil = document.getElementById('btn_off_until');
     const btnTest = document.getElementById('btn_test');
+    if(hasPending){
+      if(btnPeak){ btnPeak.disabled = true; }
+      if(btnOff){ btnOff.disabled = true; }
+      if(btnClear){ btnClear.disabled = true; }
+      if(btnOffUntil){ btnOffUntil.disabled = true; }
+      if(btnTest){ btnTest.disabled = false; }
+      return;
+    }
     if(liveScheduleMismatch){
       if(btnPeak){ btnPeak.disabled = true; }
       if(btnOff){ btnOff.disabled = true; }
@@ -794,7 +824,16 @@ HTML = """<!doctype html>
     document.getElementById('live_status').textContent = fmt(d.live_status || d.live_error || '-');
     document.getElementById('live_bw').innerHTML = 'Current Bandwidth: <span class="ok">' + escHtml(fmt(d.live_bandwidth)) + '</span> (mapped: ' + escHtml(friendlyProfile(d.live_profile)) + ')';
     const hint = document.getElementById('live_hint');
-    if(d.live_error_detail){
+    const pendingChange = d.pending_change || null;
+    if(pendingChange && pendingChange.timed_out){
+      hint.textContent = 'Pending change timed out. Check Lumen Portal or retry after confirming live status.';
+      hint.className = 'small bad';
+    } else if(pendingChange){
+      const target = pendingChange.target_bandwidth || friendlyProfile(pendingChange.target_profile);
+      const last = pendingChange.last_live_bandwidth ? ` Last seen: ${pendingChange.last_live_bandwidth}.` : '';
+      hint.textContent = `Change requested to ${target}. Waiting for Lumen to finish applying it.${last}`;
+      hint.className = 'small warn';
+    } else if(d.live_error_detail){
       hint.textContent = d.live_error_detail;
       hint.className = 'small bad';
     } else if((d.live_status || '').toLowerCase() === 'change pending'){
@@ -806,7 +845,12 @@ HTML = """<!doctype html>
     }
     const banner = byId('override_banner');
     const bannerText = byId('override_banner_text');
-    if(d.override && d.override.until_utc){
+    if(pendingChange){
+      const target = pendingChange.target_bandwidth || friendlyProfile(pendingChange.target_profile);
+      const requested = pendingChange.requested_at_utc ? fmtPST(pendingChange.requested_at_utc) : '-';
+      banner.style.display = 'block';
+      bannerText.textContent = `Change Pending: ${target} requested ${requested} (${currentTimezone})`;
+    } else if(d.override && d.override.until_utc){
       const profile = friendlyProfile((d.override.profile || '').toLowerCase());
       const until = fmtPST(d.override.until_utc);
       banner.style.display = 'block';
@@ -949,14 +993,9 @@ HTML = """<!doctype html>
       const res = await api('/api/switch', 'POST', {profile, hours}, actionLabel);
       setActionMessage(res.message || 'Done', !res.ok);
       if(res.status){ renderStatus(res.status); }
-      const confirm = await waitForLiveConfirmation(toLiveProfile(profile), 90, actionLabel + ' (waiting for Lumen confirmation)');
-      if(confirm.ok){
-        setActionMessage('Switch confirmed by live status.', false);
-        await runPoll();
-      } else {
-        setActionMessage('Switch submitted. Live confirmation is still pending.', false);
-        startBurstPolling(120);
-      }
+      setActionMessage('Change requested. Waiting for Lumen to finish applying it.', false);
+      const timeoutMinutes = Number((res.status && res.status.pending_timeout_minutes) || 15);
+      startBurstPolling(Math.max(60, timeoutMinutes * 60));
     } finally {
       setBusy(false, '', true);
     }
@@ -974,14 +1013,9 @@ HTML = """<!doctype html>
         ''
       );
       if(target){
-        const confirm = await waitForLiveConfirmation(target, 90, 'Clear override submitted (waiting for Lumen confirmation)');
-        if(confirm.ok){
-          setActionMessage('Clear override confirmed by live status.', false);
-          await runPoll();
-        } else {
-          setActionMessage('Override cleared. Waiting on live confirmation.', false);
-          startBurstPolling(120);
-        }
+        setActionMessage('Override cleared. Waiting for Lumen if a schedule change was requested.', false);
+        const timeoutMinutes = Number((res.status && res.status.pending_timeout_minutes) || 15);
+        startBurstPolling(Math.max(60, timeoutMinutes * 60));
       }
     } finally {
       setBusy(false, '', true);
@@ -1000,14 +1034,9 @@ HTML = """<!doctype html>
       const res = await api('/api/override-off-peak-until', 'POST', {until_local: untilLocal}, 'Setting Off-Peak Until');
       setActionMessage(res.message || 'Long Off-Peak override set.', !res.ok);
       if(res.status){ renderStatus(res.status); }
-      const confirm = await waitForLiveConfirmation('off_peak', 90, 'Long Off-Peak submitted (waiting for Lumen confirmation)');
-      if(confirm.ok){
-        setActionMessage('Long Off-Peak override confirmed by live status.', false);
-        await runPoll();
-      } else {
-        setActionMessage('Long Off-Peak override set. Waiting on live confirmation.', false);
-        startBurstPolling(120);
-      }
+      setActionMessage('Long Off-Peak change requested. Waiting for Lumen to finish applying it.', false);
+      const timeoutMinutes = Number((res.status && res.status.pending_timeout_minutes) || 15);
+      startBurstPolling(Math.max(60, timeoutMinutes * 60));
     } finally {
       setBusy(false, '', true);
     }
@@ -1088,6 +1117,11 @@ HTML = """<!doctype html>
     document.getElementById('cfg_logging_enabled').checked = Boolean(cfg.logging_enabled);
     document.getElementById('cfg_sensitive_logs').checked = Boolean(cfg.include_sensitive_logs);
     document.getElementById('cfg_debug_enabled').checked = Boolean(cfg.debug_enabled);
+    document.getElementById('cfg_block_pending').checked = Boolean(cfg.block_new_changes_while_pending);
+    document.getElementById('cfg_pending_poll_seconds').value = String(cfg.pending_poll_seconds ?? 30);
+    document.getElementById('cfg_pending_timeout_minutes').value = String(cfg.pending_timeout_minutes ?? 15);
+    document.getElementById('cfg_peak_lead_minutes').value = String(cfg.peak_lead_minutes ?? 15);
+    document.getElementById('cfg_off_peak_lead_minutes').value = String(cfg.off_peak_lead_minutes ?? 0);
     document.getElementById('cfg_default_profile').value = cfg.default_profile || 'off_peak';
     renderRuleList(cfg.rules || []);
     renderBandwidthControls({
@@ -1111,6 +1145,11 @@ HTML = """<!doctype html>
       logging_enabled: Boolean(cfg.logging_enabled),
       include_sensitive_logs: Boolean(cfg.include_sensitive_logs),
       debug_enabled: Boolean(cfg.debug_enabled),
+      block_new_changes_while_pending: Boolean(cfg.block_new_changes_while_pending),
+      pending_poll_seconds: Number(cfg.pending_poll_seconds ?? 30),
+      pending_timeout_minutes: Number(cfg.pending_timeout_minutes ?? 15),
+      peak_lead_minutes: Number(cfg.peak_lead_minutes ?? 15),
+      off_peak_lead_minutes: Number(cfg.off_peak_lead_minutes ?? 0),
       default_profile: cfg.default_profile || 'off_peak',
       rules: normalizeRules(cfg.rules || [])
     };
@@ -1150,6 +1189,11 @@ HTML = """<!doctype html>
         logging_enabled: document.getElementById('cfg_logging_enabled').checked,
         include_sensitive_logs: document.getElementById('cfg_sensitive_logs').checked,
         debug_enabled: document.getElementById('cfg_debug_enabled').checked,
+        block_new_changes_while_pending: document.getElementById('cfg_block_pending').checked,
+        pending_poll_seconds: Number(document.getElementById('cfg_pending_poll_seconds').value || '30'),
+        pending_timeout_minutes: Number(document.getElementById('cfg_pending_timeout_minutes').value || '15'),
+        peak_lead_minutes: Number(document.getElementById('cfg_peak_lead_minutes').value || '15'),
+        off_peak_lead_minutes: Number(document.getElementById('cfg_off_peak_lead_minutes').value || '0'),
         default_profile: document.getElementById('cfg_default_profile').value,
         rules: rules
       };
@@ -1288,6 +1332,11 @@ HTML = """<!doctype html>
           var cfgLogEn = byId('cfg_logging_enabled');
           var cfgSens = byId('cfg_sensitive_logs');
           var cfgDbg = byId('cfg_debug_enabled');
+          var cfgBlockPending = byId('cfg_block_pending');
+          var cfgPollSec = byId('cfg_pending_poll_seconds');
+          var cfgTimeoutMin = byId('cfg_pending_timeout_minutes');
+          var cfgPeakLead = byId('cfg_peak_lead_minutes');
+          var cfgOffLead = byId('cfg_off_peak_lead_minutes');
           var cfgDefProf = byId('cfg_default_profile');
           var ruleList = byId('rule_list');
 		      if(peakEl){ peakEl.addEventListener('change', syncBandwidthSaveButton); }
@@ -1299,7 +1348,7 @@ HTML = """<!doctype html>
               loadCostAnalytics(false);
             });
           }
-          for(const el of [cfgTz,cfgSvc,cfgLog,cfgLogEn,cfgSens,cfgDbg,cfgDefProf]){
+          for(const el of [cfgTz,cfgSvc,cfgLog,cfgLogEn,cfgSens,cfgDbg,cfgBlockPending,cfgPollSec,cfgTimeoutMin,cfgPeakLead,cfgOffLead,cfgDefProf]){
             if(el){ el.addEventListener('change', syncConfigButtons); }
             if(el){ el.addEventListener('input', syncConfigButtons); }
           }
@@ -1324,11 +1373,12 @@ HTML = """<!doctype html>
 	    await preloadBandwidthFromConfig();
 	    const first = await api('/api/status?fast=1', 'GET', null, 'Loading Live Status');
 	    renderStatus(first);
-	    const pending = ((first.live_status || '').toLowerCase() === 'change pending');
+	    const pending = Boolean(first.pending_change) || ((first.live_status || '').toLowerCase() === 'change pending');
 	    trackingChange = pending;
 	    if(pending){
 	      setIdleActivity('Waiting for Lumen to finish applying change...');
-	      startBurstPolling(120);
+	      const timeoutMinutes = Number(first.pending_timeout_minutes || 15);
+	      startBurstPolling(Math.max(60, timeoutMinutes * 60));
 	    } else {
 	      setIdleActivity('Idle. No active change pending.');
         // Fill in slower fields (cost + freshest live) after initial UI is ready.
@@ -1396,7 +1446,10 @@ def tail_file(path: Path, lines: int = 120) -> str:
 def read_cron_block() -> tuple[bool, str]:
     if not cron_available():
         return False, ""
-    proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True, check=False)
+    try:
+        proc = subprocess.run(["crontab", "-l"], capture_output=True, text=True, check=False)
+    except Exception:
+        return False, ""
     if proc.returncode != 0:
         return False, ""
     lines = proc.stdout.splitlines()
@@ -1439,8 +1492,7 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
         "x-customer-number": customer_number,
         "Accept": "application/json",
     }
-    inv_url = ls.inventory_url(base_url, iod_cfg)
-    code, text = ls.json_request("GET", inv_url, timeout=timeout, headers=headers)
+    code, text, payload, _inv_url = ls.fetch_inventory_doc(base_url, iod_cfg, timeout=timeout, headers=headers)
     if code < 200 or code > 299:
         detail = (text or "").strip().replace("\n", " ")
         if len(detail) > 400:
@@ -1452,7 +1504,8 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
         }
 
     try:
-        payload = json.loads(text)
+        if payload is None:
+            payload = json.loads(text)
         item = ls.select_inventory_item(payload, service_id)
         if not item:
             return {"live_error": f"inventory did not include serviceId {service_id}", "live_http_code": code}
@@ -1463,21 +1516,11 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
                 bandwidth = str(c.get("value", "")).strip()
                 break
 
-        live_profile = "unknown"
-        profile_map = config.get("profiles", {})
-        peak_bw = str(profile_map.get("peak", {}).get("bandwidth", "")).strip().lower()
-        off_peak_bw = str(profile_map.get("off_peak", {}).get("bandwidth", "")).strip().lower()
-        bw_norm = bandwidth.lower()
-        if peak_bw and bw_norm == peak_bw:
-            live_profile = "on_peak"
-        elif off_peak_bw and bw_norm == off_peak_bw:
-            live_profile = "off_peak"
-
         return {
             "live_http_code": code,
             "live_status": status,
             "live_bandwidth": bandwidth,
-            "live_profile": live_profile,
+            "live_profile": live_profile_for_bandwidth(config, bandwidth),
         }
     except Exception as exc:
         return {
@@ -1485,6 +1528,18 @@ def get_live_inventory(config: dict[str, Any]) -> dict[str, Any]:
             "live_http_code": code,
             "live_error_detail": (text or "")[:400],
         }
+
+
+def live_profile_for_bandwidth(config: dict[str, Any], bandwidth: str) -> str:
+    profile_map = config.get("profiles", {})
+    peak_bw = normalize_bandwidth_label(str(profile_map.get("peak", {}).get("bandwidth", ""))).lower()
+    off_peak_bw = normalize_bandwidth_label(str(profile_map.get("off_peak", {}).get("bandwidth", ""))).lower()
+    bw_norm = normalize_bandwidth_label(str(bandwidth or "")).lower()
+    if peak_bw and bw_norm == peak_bw:
+        return "on_peak"
+    if off_peak_bw and bw_norm == off_peak_bw:
+        return "off_peak"
+    return "unknown"
 
 
 def bandwidth_to_mbps(value: str) -> float:
@@ -1571,6 +1626,12 @@ def schedule_summary_lines(config: dict[str, Any]) -> list[str]:
         lines.append(f"{label}{day_text}, {time_text} -> {profile}")
     default_profile = profile_friendly(str(config.get("default_profile", "off_peak")))
     lines.append(f"Default (when no rule matches): {default_profile}")
+    runtime = ls.runtime_config(config)
+    lines.append(
+        "Lead times: "
+        f"On Peak {int(runtime.get('peak_lead_minutes', 0))} min, "
+        f"Off Peak {int(runtime.get('off_peak_lead_minutes', 0))} min"
+    )
     return lines
 
 
@@ -2113,13 +2174,43 @@ def collect_status(
         config = ls.load_config(config_path)
         state_path = ls.state_path_from_config(config, config_path)
         state = ls.load_state(state_path)
-        result = ls.profile_for_now(config, state)
+        pending_live: dict[str, Any] | None = None
+        if include_live and isinstance(state.get("pending_change"), dict):
+            # Refreshing pending state already polls Lumen inventory. Reuse that result for
+            # dashboard live status so one page refresh does not double-call the Lumen API.
+            pending_status = ls.refresh_pending_change(config, state, state_path)
+            state = ls.load_state(state_path)
+            pending_after = state.get("pending_change")
+            if isinstance(pending_after, dict):
+                live_bandwidth = str(pending_after.get("last_live_bandwidth") or "")
+                live_status = str(pending_after.get("last_live_status") or "")
+                pending_live = {
+                    "live_status": live_status or "Change pending",
+                    "live_bandwidth": live_bandwidth,
+                    "live_profile": live_profile_for_bandwidth(config, live_bandwidth),
+                    "live_warning": "Live status from pending-change poll.",
+                }
+                if pending_after.get("last_error"):
+                    pending_live["live_error"] = str(pending_after.get("last_error"))
+                    pending_live["live_error_detail"] = str(pending_after.get("last_error_detail", ""))
+            elif pending_status == "resolved":
+                completed = state.get("last_completed_change", {}) if isinstance(state.get("last_completed_change"), dict) else {}
+                live_bandwidth = str(completed.get("last_live_bandwidth") or completed.get("target_bandwidth") or "")
+                pending_live = {
+                    "live_status": str(completed.get("last_live_status") or "Active"),
+                    "live_bandwidth": live_bandwidth,
+                    "live_profile": live_profile_for_bandwidth(config, live_bandwidth),
+                    "live_warning": "Live status from completed pending-change poll.",
+                }
+        result = ls.profile_for_now_with_lead(config, state)
         base_state = dict(state)
         base_state.pop("override", None)
         base_result = ls.evaluate_with_state(config, now_local=result.now_local, state=base_state)
         cron_installed, cron_line = read_cron_block()
         live: dict[str, Any]
-        if include_live:
+        if pending_live is not None:
+            live = pending_live
+        elif include_live:
             live = get_live_inventory_resilient(config, allow_cache=allow_cache)
         else:
             live = {
@@ -2151,6 +2242,11 @@ def collect_status(
             "last_run_result": state.get("last_run_result", ""),
             "last_error": state.get("last_error", ""),
             "override": state.get("override"),
+            "pending_change": state.get("pending_change"),
+            "last_completed_change": state.get("last_completed_change"),
+            "runtime": ls.runtime_config(config),
+            "pending_poll_seconds": ls.runtime_config(config).get("pending_poll_seconds", 30),
+            "pending_timeout_minutes": ls.runtime_config(config).get("pending_timeout_minutes", 15),
             "schedule_lines": schedule_summary_lines(config),
             "cron_installed": cron_installed,
             "cron_line": cron_line,
@@ -2589,6 +2685,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/config":
             raw = load_raw_config(self.config_path)
             settings = self._dashboard_settings()
+            runtime = raw.get("runtime", {}) if isinstance(raw.get("runtime"), dict) else {}
             payload = {
                 "timezone": raw.get("timezone", "America/Los_Angeles"),
                 "default_profile": raw.get("default_profile", "off_peak"),
@@ -2599,6 +2696,11 @@ class Handler(BaseHTTPRequestHandler):
                 "logging_enabled": bool(raw.get("logging", {}).get("enabled", True)),
                 "include_sensitive_logs": bool(raw.get("logging", {}).get("include_sensitive", False)),
                 "debug_enabled": bool(raw.get("dashboard", {}).get("debug_enabled", True)),
+                "block_new_changes_while_pending": bool(runtime.get("block_new_changes_while_pending", True)),
+                "pending_poll_seconds": int(runtime.get("pending_poll_seconds", 30)),
+                "pending_timeout_minutes": int(runtime.get("pending_timeout_minutes", 15)),
+                "peak_lead_minutes": int(runtime.get("peak_lead_minutes", 15)),
+                "off_peak_lead_minutes": int(runtime.get("off_peak_lead_minutes", 0)),
                 "auth_required": bool(raw.get("dashboard", {}).get("auth_required", True)),
                 "passphrase_env": settings["passphrase_env"],
                 "passphrase_ready": settings["passphrase_ready"],
@@ -2914,7 +3016,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 state_path = ls.state_path_from_config(config, self.config_path)
                 state = ls.load_state(state_path)
-                result = ls.profile_for_now(config, state)
+                result = ls.profile_for_now_with_lead(config, state)
                 active_profile = str(result.profile_name)
                 active_changed = (active_profile == "peak" and peak_changed) or (
                     active_profile == "off_peak" and off_changed
@@ -3027,6 +3129,15 @@ class Handler(BaseHTTPRequestHandler):
                 raw["dashboard"]["auth_required"] = bool(body.get("auth_required", raw["dashboard"].get("auth_required", True)))
                 passphrase_env = str(body.get("passphrase_env", raw["dashboard"].get("passphrase_env", "DASHBOARD_PASSPHRASE"))).strip()
                 raw["dashboard"]["passphrase_env"] = passphrase_env or "DASHBOARD_PASSPHRASE"
+                raw.setdefault("runtime", {})
+                runtime = raw["runtime"]
+                runtime["pending_poll_seconds"] = max(10, min(300, int(body.get("pending_poll_seconds", runtime.get("pending_poll_seconds", 30)))))
+                runtime["pending_timeout_minutes"] = max(1, min(120, int(body.get("pending_timeout_minutes", runtime.get("pending_timeout_minutes", 15)))))
+                runtime["peak_lead_minutes"] = max(0, min(120, int(body.get("peak_lead_minutes", runtime.get("peak_lead_minutes", 15)))))
+                runtime["off_peak_lead_minutes"] = max(0, min(120, int(body.get("off_peak_lead_minutes", runtime.get("off_peak_lead_minutes", 0)))))
+                runtime["block_new_changes_while_pending"] = bool(
+                    body.get("block_new_changes_while_pending", runtime.get("block_new_changes_while_pending", True))
+                )
                 ls.save_json(self.config_path, raw)
                 Handler.log_path = apply_scheduler_logging(self.config_path, self.log_path)
                 self._write_json({"ok": True, "message": "Configuration saved."})

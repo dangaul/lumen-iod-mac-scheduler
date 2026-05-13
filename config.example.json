@@ -1,6 +1,14 @@
 {
   "timezone": "America/Los_Angeles",
   "state_file": "./.lumen-bandwidth-state.json",
+  "runtime": {
+    "lock_file": "./.lumen-bandwidth-run.lock",
+    "pending_poll_seconds": 30,
+    "pending_timeout_minutes": 15,
+    "peak_lead_minutes": 15,
+    "off_peak_lead_minutes": 0,
+    "block_new_changes_while_pending": true
+  },
   "logging": {
     "enabled": true,
     "include_sensitive": false,

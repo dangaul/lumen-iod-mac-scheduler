@@ -228,11 +228,19 @@ What managed cron does:
 - Each run evaluates:
   - current schedule (day/time rules)
   - active override (if any)
+  - configured lead times before upcoming schedule transitions
+  - any local pending Lumen change
   - then applies the target Lumen profile if a change is needed.
 - It does **not** submit a Lumen change on every run.
   - If local state already matches the target profile, it skips API apply.
   - If local state is unknown (fresh machine/state reset), it does a one-time live inventory check and only applies if needed.
+- Lumen changes are asynchronous. After an order is accepted, the scheduler records `pending_change` in the local state file and only polls inventory until Lumen reports the target bandwidth as active.
+  - This means "order accepted" and "bandwidth active" are treated as separate states. The dashboard shows the change as pending until live inventory confirms it.
+- While a change is pending, new schedule/override changes are blocked by default (`runtime.block_new_changes_while_pending=true`).
 - It uses a local run lock (`runtime.lock_file`, default `./.lumen-bandwidth-run.lock`) to prevent overlapping cron runs.
+- Pending change polling is controlled by `runtime.pending_poll_seconds` (default `30`) and `runtime.pending_timeout_minutes` (default `15`).
+- Peak/off-peak lead times are controlled by `runtime.peak_lead_minutes` (default `15`) and `runtime.off_peak_lead_minutes` (default `0`).
+  - Lead time lets cron submit a change before a scheduled boundary so Lumen has time to apply it by the intended start time.
 - Yes: if interval is `60`, it checks once every 60 minutes.
   - That means a peak/off-peak transition can be applied up to ~60 minutes late.
   - For tighter transitions, use a smaller interval (commonly `5` or `10` minutes).

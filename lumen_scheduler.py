@@ -342,6 +342,69 @@ def profile_for_now(config: dict[str, Any], state: dict[str, Any]) -> Evaluation
     return evaluate_with_state(config, now_local=now_local, state=state)
 
 
+def runtime_config(config: dict[str, Any]) -> dict[str, Any]:
+    # Keep runtime defaults in one place so cron, CLI, and dashboard behavior stay aligned.
+    cfg = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
+    return {
+        "lock_file": str(cfg.get("lock_file", ".lumen-bandwidth-run.lock")),
+        "pending_poll_seconds": int(cfg.get("pending_poll_seconds", 30)),
+        "pending_timeout_minutes": int(cfg.get("pending_timeout_minutes", 15)),
+        "peak_lead_minutes": int(cfg.get("peak_lead_minutes", 15)),
+        "off_peak_lead_minutes": int(cfg.get("off_peak_lead_minutes", 0)),
+        "block_new_changes_while_pending": bool(cfg.get("block_new_changes_while_pending", True)),
+    }
+
+
+def lead_minutes_for_profile(config: dict[str, Any], profile_name: str) -> int:
+    cfg = runtime_config(config)
+    key = str(profile_name or "").strip().lower()
+    if key == "peak":
+        return max(0, int(cfg.get("peak_lead_minutes", 0)))
+    if key == "off_peak":
+        return max(0, int(cfg.get("off_peak_lead_minutes", 0)))
+    return 0
+
+
+def profile_for_now_with_lead(config: dict[str, Any], state: dict[str, Any]) -> EvaluationResult:
+    tz_name = config.get("timezone") or "America/Los_Angeles"
+    tz = ZoneInfo(tz_name)
+    now_local = dt.datetime.now(tz)
+    current = evaluate_with_state(config, now_local=now_local, state=state)
+
+    # Manual overrides should run exactly as requested; lead time only applies to base schedule transitions.
+    if active_override_profile(config.get("profiles", {}), state, now_local):
+        return current
+
+    max_lead = max(
+        0,
+        lead_minutes_for_profile(config, "peak"),
+        lead_minutes_for_profile(config, "off_peak"),
+    )
+    if max_lead <= 0:
+        return current
+
+    base_state = dict(state)
+    base_state.pop("override", None)
+    for minutes_ahead in range(1, max_lead + 1):
+        # Look ahead minute-by-minute so cron can submit before the scheduled transition.
+        # This compensates for Lumen accepting changes before they become active.
+        future = evaluate_with_state(
+            config,
+            now_local=now_local + dt.timedelta(minutes=minutes_ahead),
+            state=base_state,
+        )
+        if future.profile_name == current.profile_name:
+            continue
+        if lead_minutes_for_profile(config, future.profile_name) >= minutes_ahead:
+            return EvaluationResult(
+                profile_name=future.profile_name,
+                profile=future.profile,
+                rule_name=f"lead_{minutes_ahead}m_before_{future.rule_name}",
+                now_local=now_local,
+            )
+    return current
+
+
 def replace_placeholders(value: Any, values: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         return {k: replace_placeholders(v, values) for k, v in value.items()}
@@ -447,9 +510,48 @@ def inventory_service_type(iod_cfg: dict[str, Any]) -> str:
     return str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet On-Demand").strip()
 
 
-def inventory_url(base_url: str, iod_cfg: dict[str, Any]) -> str:
+def inventory_urls(base_url: str, iod_cfg: dict[str, Any]) -> list[str]:
+    # Prefer exact serviceId lookup, but keep serviceType as a fallback because Lumen has
+    # returned different inventory behavior during pending/in-progress changes.
+    urls: list[str] = []
+    service_id = str(iod_cfg.get("service_id", "")).strip()
+    if not is_placeholder_value(service_id):
+        urls.append(f"{base_url}/ProductInventory/v1/inventory?{parse.urlencode({'serviceId': service_id})}")
     service_type = inventory_service_type(iod_cfg)
-    return f"{base_url}/ProductInventory/v1/inventory?{parse.urlencode({'serviceType': service_type})}"
+    if service_type:
+        urls.append(f"{base_url}/ProductInventory/v1/inventory?{parse.urlencode({'serviceType': service_type})}")
+    return list(dict.fromkeys(urls))
+
+
+def inventory_url(base_url: str, iod_cfg: dict[str, Any]) -> str:
+    urls = inventory_urls(base_url, iod_cfg)
+    if not urls:
+        return f"{base_url}/ProductInventory/v1/inventory"
+    return urls[0]
+
+
+def fetch_inventory_doc(
+    base_url: str,
+    iod_cfg: dict[str, Any],
+    timeout: int,
+    headers: dict[str, str],
+) -> tuple[int, str, dict[str, Any] | None, str]:
+    # Try every supported inventory lookup form before surfacing an error. This avoids
+    # treating a transient serviceId lookup failure as a hard dashboard/scheduler failure.
+    last_code = 0
+    last_text = ""
+    last_url = ""
+    for url in inventory_urls(base_url, iod_cfg):
+        last_url = url
+        try:
+            last_code, last_text = json_request("GET", url, timeout=timeout, headers=headers)
+        except Exception as exc:
+            last_code = 0
+            last_text = str(exc)
+            continue
+        if 200 <= last_code <= 299:
+            return last_code, last_text, json.loads(last_text), url
+    return last_code, last_text, None, last_url
 
 
 def inventory_characteristics(inventory: dict[str, Any]) -> list[dict[str, Any]]:
@@ -490,10 +592,9 @@ def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
         token = fetch_token(auth_cfg, timeout=timeout)
     except Exception as exc:
         return False, f"auth failed: {exc}"
-    inv_url = inventory_url(base_url, iod_cfg)
-    code, text = json_request(
-        "GET",
-        inv_url,
+    code, text, payload, _inv_url = fetch_inventory_doc(
+        base_url,
+        iod_cfg,
         timeout=timeout,
         headers={
             "Authorization": f"Bearer {token}",
@@ -504,7 +605,8 @@ def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
     if code < 200 or code > 299:
         return False, f"inventory failed HTTP {code}"
     try:
-        payload = json.loads(text)
+        if payload is None:
+            payload = json.loads(text)
         item = select_inventory_item(payload, service_id)
         if not item:
             return False, f"inventory did not include serviceId {service_id}"
@@ -514,6 +616,203 @@ def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
         return False, "bandwidth not found"
     except Exception as exc:
         return False, f"inventory parse failed: {exc}"
+
+
+def bandwidth_from_inventory_item(item: dict[str, Any]) -> str:
+    for c in inventory_characteristics(item):
+        if str(c.get("name", "")).strip().lower() == "bandwidth":
+            return normalize_bandwidth_label(str(c.get("value", "")))
+    return ""
+
+
+def get_live_inventory_state(config: dict[str, Any]) -> dict[str, Any]:
+    iod_cfg = config.get("lumen_iod", {})
+    base_url = str(iod_cfg.get("base_url", "https://api.lumen.com")).rstrip("/")
+    customer_number = str(iod_cfg.get("customer_number", "")).strip()
+    service_id = str(iod_cfg.get("service_id", "")).strip()
+    timeout = int(iod_cfg.get("timeout_seconds", 20))
+    if is_placeholder_value(customer_number) or is_placeholder_value(service_id):
+        return {"ok": False, "error": "missing customer_number/service_id"}
+    auth_cfg = copy.deepcopy(iod_cfg.get("auth", {}))
+    if not auth_cfg:
+        return {"ok": False, "error": "missing lumen_iod.auth"}
+    auth_cfg.setdefault("token_url", f"{base_url}/oauth/v2/token")
+    try:
+        token = fetch_token(auth_cfg, timeout=timeout)
+    except Exception as exc:
+        return {"ok": False, "error": f"auth failed: {exc}"}
+
+    code, text, payload, inv_url = fetch_inventory_doc(
+        base_url,
+        iod_cfg,
+        timeout=timeout,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "x-customer-number": customer_number,
+            "Accept": "application/json",
+        },
+    )
+    if code < 200 or code > 299:
+        detail = (text or "").strip().replace("\n", " ")
+        return {"ok": False, "http_code": code, "error": f"inventory failed HTTP {code}", "detail": detail, "url": inv_url}
+    try:
+        if payload is None:
+            payload = json.loads(text)
+        item = select_inventory_item(payload, service_id)
+        if not item:
+            return {"ok": False, "http_code": code, "error": f"inventory did not include serviceId {service_id}", "url": inv_url}
+        return {
+            "ok": True,
+            "http_code": code,
+            "status": inventory_status(item),
+            "bandwidth": bandwidth_from_inventory_item(item),
+            "url": inv_url,
+        }
+    except Exception as exc:
+        return {"ok": False, "http_code": code, "error": f"inventory parse failed: {exc}", "detail": (text or "")[:400], "url": inv_url}
+
+
+def profile_bandwidth(profile: dict[str, Any]) -> str:
+    return normalize_bandwidth_label(
+        str(profile.get("bandwidth") or profile.get("bandwidth_mbps") or "").strip()
+    )
+
+
+def extract_quote_id(details: str) -> str:
+    match = re.search(r"quoteId=([A-Za-z0-9_.-]+)", str(details))
+    return match.group(1) if match else ""
+
+
+def pending_timeout_at(config: dict[str, Any], requested_at_utc: dt.datetime) -> str:
+    timeout_minutes = max(1, int(runtime_config(config).get("pending_timeout_minutes", 15)))
+    return (requested_at_utc + dt.timedelta(minutes=timeout_minutes)).isoformat()
+
+
+def record_pending_change(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    result: EvaluationResult,
+    details: str,
+    source: str,
+) -> None:
+    # Lumen order acceptance only means the request was queued. Store a local pending
+    # marker and wait for inventory to confirm the target bandwidth before marking success.
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    target_bandwidth = profile_bandwidth(result.profile)
+    state["pending_change"] = {
+        "target_profile": result.profile_name,
+        "target_bandwidth": target_bandwidth,
+        "target_rule": result.rule_name,
+        "source": source,
+        "quote_id": extract_quote_id(details),
+        "requested_at_utc": now_utc.isoformat(),
+        "timeout_at_utc": pending_timeout_at(config, now_utc),
+        "last_checked_at_utc": "",
+        "last_live_status": "",
+        "last_live_bandwidth": "",
+        "timed_out": False,
+    }
+    state.update(
+        {
+            "last_run_at": now_utc.isoformat(),
+            "last_run_result": "pending",
+            "last_error": "",
+            "profile_values": result.profile,
+        }
+    )
+
+
+def parse_utc(value: str) -> dt.datetime | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(raw)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=dt.timezone.utc)
+        return parsed.astimezone(dt.timezone.utc)
+    except Exception:
+        return None
+
+
+def refresh_pending_change(config: dict[str, Any], state: dict[str, Any], state_path: Path | None = None) -> str:
+    # One inventory poll updates both user-visible status and the local state machine.
+    # Callers should not submit another bandwidth change while this returns "pending".
+    pending = state.get("pending_change")
+    if not isinstance(pending, dict):
+        return "none"
+
+    now_utc = dt.datetime.now(dt.timezone.utc)
+    live = get_live_inventory_state(config)
+    pending["last_checked_at_utc"] = now_utc.isoformat()
+
+    target_bandwidth = normalize_bandwidth_label(str(pending.get("target_bandwidth", "")))
+    target_profile = str(pending.get("target_profile", "")).strip()
+    live_status = ""
+    live_bandwidth = ""
+
+    if live.get("ok"):
+        live_status = str(live.get("status", "")).strip()
+        live_bandwidth = normalize_bandwidth_label(str(live.get("bandwidth", "")))
+        pending["last_live_status"] = live_status
+        pending["last_live_bandwidth"] = live_bandwidth
+        pending.pop("last_error", None)
+    else:
+        pending["last_error"] = str(live.get("error", "live inventory check failed"))
+        if live.get("detail"):
+            pending["last_error_detail"] = str(live.get("detail"))
+
+    timeout_at = parse_utc(str(pending.get("timeout_at_utc", "")))
+    timed_out = bool(timeout_at and now_utc >= timeout_at)
+    status_is_pending = live_status.lower() == "change pending"
+    bandwidth_matches = bool(target_bandwidth and live_bandwidth and live_bandwidth.lower() == target_bandwidth.lower())
+
+    if live.get("ok") and bandwidth_matches and not status_is_pending:
+        completed = dict(pending)
+        completed["completed_at_utc"] = now_utc.isoformat()
+        state["last_completed_change"] = completed
+        state.pop("pending_change", None)
+        state.update(
+            {
+                "last_profile": target_profile,
+                "last_rule": str(pending.get("target_rule", "")),
+                "last_applied_at": now_utc.isoformat(),
+                "last_run_at": now_utc.isoformat(),
+                "last_run_result": "success",
+                "last_error": "",
+            }
+        )
+        if state_path is not None:
+            save_json(state_path, state)
+        return "resolved"
+
+    if timed_out:
+        pending["timed_out"] = True
+        state.update(
+            {
+                "last_run_at": now_utc.isoformat(),
+                "last_run_result": "error",
+                "last_error": (
+                    f"Pending change to {target_bandwidth or target_profile} timed out. "
+                    f"Last live status={live_status or 'unknown'}, bandwidth={live_bandwidth or 'unknown'}."
+                ),
+            }
+        )
+        result = "timed_out"
+    else:
+        pending["timed_out"] = False
+        state.update(
+            {
+                "last_run_at": now_utc.isoformat(),
+                "last_run_result": "pending",
+                "last_error": "",
+            }
+        )
+        result = "pending"
+
+    if state_path is not None:
+        save_json(state_path, state)
+    return result
 
 
 def apply_lumen_iod_profile(
@@ -601,11 +900,17 @@ def apply_lumen_iod_profile(
             quote_identifier = str(iod_cfg.get("port_service_id") or service_id)
             quote_identifier_key = "serviceId"
     else:
-        inv_code, inv_text = json_request("GET", inv_url, timeout=timeout, headers=common_headers)
+        inv_code, inv_text, inv_doc, _inv_url = fetch_inventory_doc(
+            base_url,
+            iod_cfg,
+            timeout=timeout,
+            headers=common_headers,
+        )
         if inv_code < 200 or inv_code > 299:
             return False, f"Inventory lookup failed HTTP {inv_code}: {inv_text}"
 
-        inv_doc = json.loads(inv_text)
+        if inv_doc is None:
+            inv_doc = json.loads(inv_text)
         inventory = select_inventory_item(inv_doc, service_id)
         if not inventory:
             return False, f"Inventory lookup did not include serviceId {service_id}"
@@ -771,13 +1076,17 @@ def apply_lumen_iod_profile(
     wait_minutes = int(iod_cfg.get("wait_for_update_minutes", 5))
     if verify:
         time.sleep(max(0, wait_minutes) * 60)
-        verify_code, verify_text = json_request(
-            "GET", inv_url, timeout=timeout, headers=common_headers
+        verify_code, verify_text, verify_doc, _verify_url = fetch_inventory_doc(
+            base_url,
+            iod_cfg,
+            timeout=timeout,
+            headers=common_headers,
         )
         if verify_code < 200 or verify_code > 299:
             return False, f"Post-update verification failed HTTP {verify_code}: {verify_text}"
 
-        verify_doc = json.loads(verify_text)
+        if verify_doc is None:
+            verify_doc = json.loads(verify_text)
         items = verify_doc.get("serviceInventory") or []
         if items:
             bandwidth_seen = ""
@@ -863,8 +1172,7 @@ def state_path_from_config(config: dict[str, Any], config_path: Path) -> Path:
 
 
 def lock_path_from_config(config: dict[str, Any], config_path: Path) -> Path:
-    runtime_cfg = config.get("runtime", {}) if isinstance(config.get("runtime"), dict) else {}
-    raw = str(runtime_cfg.get("lock_file", ".lumen-bandwidth-run.lock"))
+    raw = str(runtime_config(config).get("lock_file", ".lumen-bandwidth-run.lock"))
     p = Path(raw)
     if p.is_absolute():
         return p
@@ -951,6 +1259,18 @@ def apply_override_until(
 
     state_path = state_path_from_config(config, config_path)
     state = load_state(state_path)
+    if (
+        runtime_config(config).get("block_new_changes_while_pending", True)
+        and isinstance(state.get("pending_change"), dict)
+    ):
+        pending_status = refresh_pending_change(config, state, state_path if not dry_run else None)
+        if pending_status in {"pending", "timed_out"}:
+            emit(
+                "pending_change=true action=skip_new_override "
+                f"status={pending_status} target_bandwidth={state.get('pending_change', {}).get('target_bandwidth', '')}",
+                error=(pending_status == "timed_out"),
+            )
+            return 2
     cleanup_expired_override(config, state)
 
     tz = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
@@ -1022,22 +1342,25 @@ def apply_override_until(
                 save_json(state_path, state)
             return 2
         emit(f"action=apply success=true details={details}")
+        if not dry_run:
+            record_pending_change(config, state, result, details, source="override")
     else:
         emit("action=apply success=true details=already_on_requested_profile")
 
     if not dry_run:
         state["override"] = override_block
-        state.update(
-            {
-                "last_profile": profile_name,
-                "last_rule": result.rule_name,
-                "last_applied_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "last_run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                "last_run_result": "success",
-                "last_error": "",
-                "profile_values": result.profile,
-            }
-        )
+        if not should_apply:
+            state.update(
+                {
+                    "last_profile": profile_name,
+                    "last_rule": result.rule_name,
+                    "last_applied_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "last_run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    "last_run_result": "success",
+                    "last_error": "",
+                    "profile_values": result.profile,
+                }
+            )
         save_json(state_path, state)
     return 0
 
@@ -1092,6 +1415,27 @@ def run_once(config_path: Path, force: bool, dry_run: bool) -> int:
 def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_run: bool) -> int:
     state_path = state_path_from_config(config, config_path)
     state = load_state(state_path)
+    if isinstance(state.get("pending_change"), dict) and not dry_run:
+        pending_status = refresh_pending_change(config, state, state_path)
+        pending = state.get("pending_change", {})
+        if pending_status == "resolved":
+            emit("pending_change=false action=resolved")
+            return 0
+        if pending_status == "timed_out":
+            emit(
+                "pending_change=true action=skip status=timed_out "
+                f"target_bandwidth={pending.get('target_bandwidth', '')}",
+                error=True,
+            )
+            return 2
+        emit(
+            "pending_change=true action=skip status=pending "
+            f"target_bandwidth={pending.get('target_bandwidth', '')} "
+            f"last_live_status={pending.get('last_live_status', '')} "
+            f"last_live_bandwidth={pending.get('last_live_bandwidth', '')}"
+        )
+        return 0
+
     if cleanup_expired_override(config, state) and not dry_run:
         save_json(state_path, state)
 
@@ -1112,7 +1456,7 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
                 f"profile={override_profile}"
             )
 
-    result = profile_for_now(config, state)
+    result = profile_for_now_with_lead(config, state)
 
     prev_profile = state.get("last_profile")
     should_apply = force or prev_profile != result.profile_name
@@ -1163,17 +1507,7 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
     if ok:
         emit(f"action=apply success=true details={details}")
         if not dry_run:
-            state.update(
-                {
-                    "last_profile": result.profile_name,
-                    "last_rule": result.rule_name,
-                    "last_applied_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "last_run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
-                    "last_run_result": "success",
-                    "last_error": "",
-                    "profile_values": result.profile,
-                }
-            )
+            record_pending_change(config, state, result, details, source="schedule")
             save_json(state_path, state)
         return 0
 
@@ -1321,9 +1655,11 @@ def main() -> int:
             config = load_config(config_path)
             state_path = state_path_from_config(config, config_path)
             state = load_state(state_path)
+            if isinstance(state.get("pending_change"), dict):
+                refresh_pending_change(config, state, state_path)
             if cleanup_expired_override(config, state):
                 save_json(state_path, state)
-            result = profile_for_now(config, state)
+            result = profile_for_now_with_lead(config, state)
             emit(f"time={result.now_local.isoformat()}")
             emit(f"rule={result.rule_name}")
             emit(f"profile={result.profile_name}")
@@ -1331,6 +1667,9 @@ def main() -> int:
             override = state.get("override")
             if override:
                 emit(f"override={json.dumps(override, sort_keys=True)}")
+            pending = state.get("pending_change")
+            if pending:
+                emit(f"pending_change={json.dumps(pending, sort_keys=True)}")
             return 0
 
         if args.command == "override":
