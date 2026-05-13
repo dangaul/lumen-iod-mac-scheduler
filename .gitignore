@@ -27,3 +27,4 @@ lumen_bandwidthmodifier-main.zip
 *.log
 .lumen-bandwidth-state.json
 __pycache__/
+.claude/
