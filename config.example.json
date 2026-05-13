@@ -14,6 +14,12 @@
     "include_sensitive": false,
     "file": "./lumen-scheduler.log"
   },
+  "notifications": {
+    "teams_webhook_url": "${TEAMS_WEBHOOK_URL:-}",
+    "on_apply_failure": true,
+    "on_pending_timeout": true,
+    "on_recovery": false
+  },
   "dashboard": {
     "auth_required": false,
     "passphrase_env": "DASHBOARD_PASSPHRASE",

@@ -19,6 +19,7 @@ import logging
 import os
 import random
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -353,6 +354,74 @@ def runtime_config(config: dict[str, Any]) -> dict[str, Any]:
         "off_peak_lead_minutes": int(cfg.get("off_peak_lead_minutes", 0)),
         "block_new_changes_while_pending": bool(cfg.get("block_new_changes_while_pending", True)),
     }
+
+
+def notifications_config(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = config.get("notifications", {}) if isinstance(config.get("notifications"), dict) else {}
+    return {
+        "teams_webhook_url": str(cfg.get("teams_webhook_url", "") or "").strip(),
+        "on_apply_failure": bool(cfg.get("on_apply_failure", True)),
+        "on_pending_timeout": bool(cfg.get("on_pending_timeout", True)),
+        "on_recovery": bool(cfg.get("on_recovery", False)),
+    }
+
+
+def send_teams_notification(
+    webhook_url: str,
+    title: str,
+    message: str,
+    facts: list[dict[str, str]] | None = None,
+    is_error: bool = True,
+) -> None:
+    hostname = socket.gethostname()
+    now_str = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    all_facts: list[dict[str, str]] = [
+        {"name": "Host", "value": hostname},
+        {"name": "Time (UTC)", "value": now_str},
+    ]
+    if facts:
+        all_facts.extend(facts)
+    payload = {
+        "@type": "MessageCard",
+        "@context": "http://schema.org/extensions",
+        "themeColor": "FF0000" if is_error else "22C55E",
+        "summary": title,
+        "sections": [
+            {
+                "activityTitle": f"**{title}**",
+                "activityText": message,
+                "facts": all_facts,
+            }
+        ],
+    }
+    body = json.dumps(payload).encode("utf-8")
+    req = request.Request(webhook_url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with request.urlopen(req, timeout=10) as resp:  # nosec B310
+            status = int(getattr(resp, "status", None) or resp.getcode())
+            if status >= 400:
+                LOGGER.warning("Teams notification returned HTTP %s", status)
+    except Exception as exc:
+        # Notification failure must never crash the scheduler.
+        LOGGER.warning("Teams notification failed: %s", exc)
+
+
+def notify(
+    config: dict[str, Any],
+    event: str,
+    title: str,
+    message: str,
+    facts: list[dict[str, str]] | None = None,
+    is_error: bool = True,
+) -> None:
+    ncfg = notifications_config(config)
+    webhook_url = ncfg["teams_webhook_url"]
+    if not webhook_url or is_placeholder_value(webhook_url):
+        return
+    if not bool(ncfg.get(f"on_{event}", True)):
+        return
+    send_teams_notification(webhook_url, title=title, message=message, facts=facts, is_error=is_error)
 
 
 def lead_minutes_for_profile(config: dict[str, Any], profile_name: str) -> int:
@@ -1420,12 +1489,41 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
         pending = state.get("pending_change", {})
         if pending_status == "resolved":
             emit("pending_change=false action=resolved")
+            completed = state.get("last_completed_change", {})
+            notify(
+                config,
+                event="recovery",
+                title="Lumen scheduler: bandwidth change confirmed",
+                message=f"Bandwidth successfully changed to {completed.get('target_bandwidth', 'unknown')}.",
+                facts=[
+                    {"name": "Profile", "value": completed.get("target_profile", "")},
+                    {"name": "Bandwidth", "value": completed.get("target_bandwidth", "")},
+                    {"name": "Source", "value": completed.get("source", "")},
+                ],
+                is_error=False,
+            )
             return 0
         if pending_status == "timed_out":
             emit(
                 "pending_change=true action=skip status=timed_out "
                 f"target_bandwidth={pending.get('target_bandwidth', '')}",
                 error=True,
+            )
+            notify(
+                config,
+                event="pending_timeout",
+                title="Lumen scheduler: pending bandwidth change timed out",
+                message=(
+                    f"A bandwidth change to {pending.get('target_bandwidth', 'unknown')} "
+                    "was submitted but did not confirm within the timeout window. "
+                    "Manual verification may be required."
+                ),
+                facts=[
+                    {"name": "Target profile", "value": pending.get("target_profile", "")},
+                    {"name": "Target bandwidth", "value": pending.get("target_bandwidth", "")},
+                    {"name": "Last live status", "value": pending.get("last_live_status", "unknown")},
+                    {"name": "Last live bandwidth", "value": pending.get("last_live_bandwidth", "unknown")},
+                ],
             )
             return 2
         emit(
@@ -1513,6 +1611,17 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
 
     emit(f"action=apply success=false details={details}", error=True)
     if not dry_run:
+        notify(
+            config,
+            event="apply_failure",
+            title="Lumen scheduler: bandwidth change failed",
+            message=redact_sensitive_text(details),
+            facts=[
+                {"name": "Profile", "value": result.profile_name},
+                {"name": "Rule", "value": result.rule_name},
+                {"name": "Bandwidth", "value": profile_bandwidth(result.profile)},
+            ],
+        )
         state.update(
             {
                 "last_run_at": dt.datetime.now(dt.timezone.utc).isoformat(),

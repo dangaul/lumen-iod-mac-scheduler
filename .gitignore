@@ -13,6 +13,9 @@ dist/
 __pycache__/
 *.py[cod]
 
+# Claude Code / babysitter plugin local cache (contains machine-specific paths)
+.a5c/
+
 # macOS
 .DS_Store
 
