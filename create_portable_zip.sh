@@ -14,6 +14,7 @@ zip -r "${OUT_FILE}" \
   "README.md" \
   "lumen_scheduler.py" \
   "dashboard.py" \
+  "test_lumen_scheduler.py" \
   "config.example.json" \
   ".env.example" \
   "launch_web_page.sh" \

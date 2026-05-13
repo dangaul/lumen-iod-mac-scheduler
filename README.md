@@ -24,7 +24,7 @@ It sets bandwidth by schedule in the configured `timezone` from `config.json` (d
 - Off-peak: `100 Mbps`
   - All other times (including weekends)
 
-Example service ID format: `77123456789` (11 digits).
+Example service ID format: `77123456789` (11 digits). The value in `config.example.json` is a placeholder — replace it with your real service ID before running. See [Finding your service ID](#finding-your-service-id) below.
 
 ## Lumen API flow used
 
@@ -51,6 +51,13 @@ If Python is missing and you use Homebrew, you can let the installer add it:
 ```bash
 AUTO_INSTALL_PYTHON=1 ./install_macos.sh
 ```
+
+The install script will:
+- Create `config.json` from the template if it does not exist
+- Create `.env` from the template if it does not exist
+- Warn about any new config sections or env variables added since the last release
+- Warn if `lumen_iod.service_id` is still the placeholder value, and automatically query the Lumen API for available service IDs if credentials are already present in `.env`
+- Run a syntax check and the unit test suite as a final validation step
 
 Important:
 - Cron/scheduler jobs do **not** run while the Mac is asleep or powered off.
@@ -80,7 +87,7 @@ Use `LUMEN_CLIENT_ID` plus one of:
 
 `LUMEN_BILLING_ACCOUNT_ID` can be set to a value like `5-3ABCDE12`. The script can also derive billing account values from the inventory API response.
 
-3. Validate:
+3. Find and set your service ID (see below), then validate:
 
 ```bash
 python3 ./lumen_scheduler.py --config ./config.json status
@@ -92,6 +99,57 @@ If you see `Config not found .../config.json`, create it first:
 ```bash
 cp ./config.example.json ./config.json
 ```
+
+## Finding your service ID
+
+The `service_id` in `config.example.json` is a placeholder. Run this after filling in your `.env` credentials to list your actual Lumen Internet On-Demand services:
+
+```bash
+python3 ./lumen_scheduler.py --config ./config.json list-services
+```
+
+Output example:
+```
+Found 1 Internet On-Demand service(s):
+
+  service_id: 77133831778  status: Active  bandwidth: 500 Mbps
+
+Set lumen_iod.service_id in config.json to one of the above.
+```
+
+Copy the `service_id` value into `lumen_iod.service_id` in your `config.json`. The install script runs this automatically if credentials are present and the service ID is still a placeholder.
+
+## Notifications (Microsoft Teams)
+
+The scheduler can post alerts to a Microsoft Teams channel when a bandwidth change fails or times out. No Apple ID or personal account is needed on the machine — only a webhook URL stored in `.env`.
+
+**Setup:**
+
+1. In Teams, go to the target channel → `...` → `Connectors` → `Incoming Webhook`. Copy the webhook URL.
+   - For newer Teams setups without Connectors, create a Power Automate flow with a `When an HTTP request is received` trigger and use that URL.
+2. Add to `.env`:
+   ```
+   TEAMS_WEBHOOK_URL=https://your-org.webhook.office.com/webhookb2/...
+   ```
+3. Add to `config.json` (already present in `config.example.json`):
+   ```json
+   "notifications": {
+     "teams_webhook_url": "${TEAMS_WEBHOOK_URL:-}",
+     "on_apply_failure": true,
+     "on_pending_timeout": true,
+     "on_recovery": false
+   }
+   ```
+
+**Alert events:**
+
+| Key | Default | Fires when |
+|---|---|---|
+| `on_apply_failure` | `true` | Lumen API rejects or errors on a bandwidth change order |
+| `on_pending_timeout` | `true` | A submitted order does not confirm within the timeout window |
+| `on_recovery` | `false` | A pending change successfully confirms (opt-in) |
+
+Each alert includes the machine hostname, timestamp, profile name, bandwidth target, and error detail. Sensitive values (tokens, credentials) are stripped before the message is sent. A notification failure never crashes the scheduler — it logs a warning and continues.
 
 ## How To / Usage Examples
 
@@ -132,6 +190,12 @@ Check current matched profile/rule:
 
 ```bash
 python3 ./lumen_scheduler.py --config ./config.json status
+```
+
+List available Lumen service IDs for this account:
+
+```bash
+python3 ./lumen_scheduler.py --config ./config.json list-services
 ```
 
 Start local dashboard (current profile, last run, cron line, recent logs):
@@ -248,27 +312,67 @@ What managed cron does:
 - After override expiration, the next cron run applies the normal scheduled profile.
 - Manual overrides are clipped so they do not overlap into time where base schedule already matches that profile.
   - Example: if Off Peak starts at `6:00 PM`, an Off Peak override started at `5:00 PM` is capped to `1 hour`.
+- If a bandwidth change fails or times out, a Teams alert is sent if `notifications` is configured in `config.json`.
 
-## Packaging / Transfer
+## Tests
 
-You can zip and move this to another Mac, but do not include secret/local files.
+A unit test suite covers the notification layer (config defaults, Teams payload structure, resilience, and gating logic):
 
-Safe package script:
+```bash
+python3 -m unittest test_lumen_scheduler.py -v
+```
+
+Run this before committing or deploying an update. The install script also runs it automatically.
+
+## Packaging / Deploying to Another Mac
+
+The target machine does not need git or any account login. Transfer a zip built on your dev machine.
+
+**Build the zip:**
 
 ```bash
 ./create_portable_zip.sh
 ```
 
-This creates `./dist/lumen-scheduler-macos-<timestamp>.zip` with:
-- code/scripts
-- `config.example.json`
-- `.env.example`
-- README
+This creates `./dist/lumen-scheduler-macos-<timestamp>.zip` containing:
+- `lumen_scheduler.py`, `dashboard.py`, `test_lumen_scheduler.py`
+- `install_macos.sh`, `launch_web_page.sh`, `stop_web_page.sh`, `restart_web_page.sh`
+- `config.example.json`, `.env.example`, `README.md`
 
-It excludes:
-- `.env`
-- `config.json`
-- logs, state, and cache files
+It excludes `.env`, `config.json`, logs, state files, and cache — nothing sensitive.
+
+**Transfer options (no Apple ID required):**
+- USB drive
+- AirDrop (works without Apple ID — Discovery set to `Everyone`, same network)
+- Shared network folder
+
+**First install on the target Mac:**
+
+```bash
+unzip lumen-scheduler-macos-*.zip -d lumen-scheduler
+cd lumen-scheduler
+bash install_macos.sh
+```
+
+Then edit `.env` with real credentials and `TEAMS_WEBHOOK_URL`, and update `config.json` with your `service_id`.
+
+**Updating an existing install:**
+
+Unzip the new package into the same folder (overwrites `.py` and `.sh` files) and re-run:
+
+```bash
+bash install_macos.sh
+```
+
+The installer will not overwrite an existing `.env` or `config.json`. It will warn about any new config sections or env variables that need to be added manually, for example:
+
+```
+[install] WARNING: config.json is missing new section(s): notifications
+[install]   See config.example.json for the required structure and add them manually.
+
+[install] WARNING: .env is missing new variable(s): TEAMS_WEBHOOK_URL
+[install]   Add them to ./.env before relying on notifications.
+```
 
 ## Notes
 

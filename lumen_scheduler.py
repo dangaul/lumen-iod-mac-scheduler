@@ -645,6 +645,54 @@ def select_inventory_item(inv_doc: dict[str, Any], service_id: str) -> dict[str,
     return inventory_items[0]
 
 
+def list_lumen_services(config: dict[str, Any]) -> tuple[bool, list[dict[str, Any]], str]:
+    """Query inventory by serviceType and return all matching IoD services.
+
+    Returns (ok, items, error_message). Does not require service_id in config.
+    """
+    iod_cfg = config.get("lumen_iod", {})
+    base_url = str(iod_cfg.get("base_url", "https://api.lumen.com")).rstrip("/")
+    customer_number = str(iod_cfg.get("customer_number", "")).strip()
+    timeout = int(iod_cfg.get("timeout_seconds", 20))
+
+    if is_placeholder_value(customer_number):
+        return False, [], "lumen_iod.customer_number is not set"
+
+    auth_cfg = copy.deepcopy(iod_cfg.get("auth", {}))
+    if not auth_cfg:
+        return False, [], "lumen_iod.auth is not configured"
+    auth_cfg.setdefault("token_url", f"{base_url}/oauth/v2/token")
+
+    try:
+        token = fetch_token(auth_cfg, timeout=timeout)
+    except Exception as exc:
+        return False, [], f"auth failed: {exc}"
+
+    # Use serviceType only — deliberately omit serviceId to get all services.
+    service_type = inventory_service_type(iod_cfg)
+    url = f"{base_url}/ProductInventory/v1/inventory?{parse.urlencode({'serviceType': service_type})}"
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "x-customer-number": customer_number,
+        "Accept": "application/json",
+    }
+    try:
+        code, text = json_request("GET", url, timeout=timeout, headers=headers)
+    except Exception as exc:
+        return False, [], f"inventory request failed: {exc}"
+
+    if code < 200 or code > 299:
+        return False, [], f"inventory returned HTTP {code}"
+
+    try:
+        doc = json.loads(text)
+    except Exception as exc:
+        return False, [], f"inventory parse failed: {exc}"
+
+    items = doc.get("serviceInventory") or []
+    return True, items, ""
+
+
 def get_live_inventory_bandwidth(config: dict[str, Any]) -> tuple[bool, str]:
     iod_cfg = config.get("lumen_iod", {})
     base_url = str(iod_cfg.get("base_url", "https://api.lumen.com")).rstrip("/")
@@ -1737,6 +1785,8 @@ def parse_args() -> argparse.Namespace:
 
     sub.add_parser("remove-cron", help="Remove cron entry created by this tool")
 
+    sub.add_parser("list-services", help="Query Lumen API and list available Internet On-Demand service IDs")
+
     return parser.parse_args()
 
 
@@ -1792,6 +1842,29 @@ def main() -> int:
 
         if args.command == "clear-override":
             return clear_override(config_path)
+
+        if args.command == "list-services":
+            config = load_config(config_path)
+            ok, items, err = list_lumen_services(config)
+            if not ok:
+                emit(f"list-services failed: {err}", error=True)
+                return 2
+            if not items:
+                emit("No Internet On-Demand services found for this account.")
+                return 0
+            emit(f"Found {len(items)} Internet On-Demand service(s):\n")
+            for item in items:
+                sid = str(item.get("serviceId", "")).strip()
+                status = inventory_status(item)
+                bandwidth = bandwidth_from_inventory_item(item)
+                parts = [f"  service_id: {sid}"]
+                if status:
+                    parts.append(f"status: {status}")
+                if bandwidth:
+                    parts.append(f"bandwidth: {bandwidth}")
+                emit("  ".join(parts))
+            emit(f'\nSet lumen_iod.service_id in config.json to one of the above.')
+            return 0
 
         script_path = Path(__file__).resolve()
         if args.command == "install-cron":

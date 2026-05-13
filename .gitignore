@@ -18,6 +18,8 @@ __pycache__/
 
 # macOS
 .DS_Store
+*.swp
+*.swo
 
 # Reference/sample projects (not part of this tool)
 Lumen-IoD-Scheduler-main/

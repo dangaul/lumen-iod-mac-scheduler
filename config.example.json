@@ -57,7 +57,8 @@
   "lumen_iod": {
     "base_url": "https://api.lumen.com",
     "customer_number": "${LUMEN_CUSTOMER_NUMBER}",
-    "service_id": "77123456789",
+    "_service_id_note": "REQUIRED: Replace service_id with your actual Lumen service ID before running.",
+    "service_id": "YOUR_SERVICE_ID",
     "timeout_seconds": 20,
     "verify_after_order": false,
     "wait_for_update_minutes": 5,
