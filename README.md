@@ -141,7 +141,7 @@ The scheduler can post alerts to a Microsoft Teams channel when a bandwidth chan
    }
    ```
 
-**Alert events:**
+**Production alert events** (always active when webhook is configured):
 
 | Key | Default | Fires when |
 |---|---|---|
@@ -149,7 +149,40 @@ The scheduler can post alerts to a Microsoft Teams channel when a bandwidth chan
 | `on_pending_timeout` | `true` | A submitted order does not confirm within the timeout window |
 | `on_recovery` | `false` | A pending change successfully confirms (opt-in) |
 
-Each alert includes the machine hostname, timestamp, profile name, bandwidth target, and error detail. Sensitive values (tokens, credentials) are stripped before the message is sent. A notification failure never crashes the scheduler — it logs a warning and continues.
+**Debug status notifications** (requires `dashboard.debug_enabled: true`):
+
+When debug mode is on, the scheduler also posts a status card for every bandwidth change attempt — both from scheduled cron runs and manual dashboard overrides:
+
+| Event | Example message |
+|---|---|
+| Order accepted by Lumen | `Change to 500 Mbps has started @ 9:15 AM PDT` |
+| Inventory confirms bandwidth active | `Change to 500 Mbps was successful @ 9:22 AM PDT` |
+| API rejects the order | `Change to 500 Mbps failed: Order update failed HTTP 500 @ 9:15 AM PDT` |
+| Pending change times out | `Change to 500 Mbps failed: timed out @ 9:30 AM PDT` |
+
+The timestamp uses the `timezone` from `config.json` (e.g. `PDT`, `PST`). Debug notifications are green for success, red for failure.
+
+To test notifications without triggering a real bandwidth change:
+
+```bash
+cd /path/to/lumen-scheduler
+python3 -c "
+import lumen_scheduler as ls, os
+from pathlib import Path
+ls.load_dotenv(Path('.env'))
+url = os.environ.get('TEAMS_WEBHOOK_URL', '')
+config = ls.load_config(Path('config.json'))
+ls.send_teams_notification(url, title='Lumen: Bandwidth change started',
+    message=f'Change to 500 Mbps has started @ {ls.local_time_str(config)}', is_error=False)
+ls.send_teams_notification(url, title='Lumen: Bandwidth change successful',
+    message=f'Change to 500 Mbps was successful @ {ls.local_time_str(config)}', is_error=False)
+ls.send_teams_notification(url, title='Lumen: Bandwidth change failed',
+    message=f'Change to 500 Mbps failed: Order update failed HTTP 500 @ {ls.local_time_str(config)}', is_error=True)
+print('Done — check Teams.')
+"
+```
+
+Each alert includes the machine hostname and timestamp. Sensitive values (tokens, credentials) are stripped before any message is sent. A notification failure never crashes the scheduler — it logs a warning and continues.
 
 ## How To / Usage Examples
 

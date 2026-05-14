@@ -407,6 +407,30 @@ def send_teams_notification(
         LOGGER.warning("Teams notification failed: %s", exc)
 
 
+def local_time_str(config: dict[str, Any]) -> str:
+    # Returns e.g. "9:15 AM PDT" — used in Teams notification messages.
+    tz = ZoneInfo(config.get("timezone") or "America/Los_Angeles")
+    return dt.datetime.now(tz).strftime("%I:%M %p %Z").lstrip("0")
+
+
+def notify_debug(
+    config: dict[str, Any],
+    title: str,
+    message: str,
+    facts: list[dict[str, str]] | None = None,
+    is_error: bool = False,
+) -> None:
+    # Only fires when dashboard.debug_enabled is true — verbose status updates
+    # (change started / successful / failed) rather than production error alerts.
+    if not bool(config.get("dashboard", {}).get("debug_enabled", False)):
+        return
+    ncfg = notifications_config(config)
+    webhook_url = ncfg["teams_webhook_url"]
+    if not webhook_url or is_placeholder_value(webhook_url):
+        return
+    send_teams_notification(webhook_url, title=title, message=message, facts=facts, is_error=is_error)
+
+
 def notify(
     config: dict[str, Any],
     event: str,
@@ -1449,6 +1473,13 @@ def apply_override_until(
         if not ok:
             emit(f"action=apply success=false details={details}", error=True)
             if not dry_run:
+                safe_details = redact_sensitive_text(details)
+                notify_debug(
+                    config,
+                    title="Lumen: Bandwidth change failed",
+                    message=f"Change to {profile_bandwidth(result.profile)} failed: {safe_details} @ {local_time_str(config)}",
+                    is_error=True,
+                )
                 state.update(
                     {
                         "last_run_at": dt.datetime.now(dt.timezone.utc).isoformat(),
@@ -1460,6 +1491,11 @@ def apply_override_until(
             return 2
         emit(f"action=apply success=true details={details}")
         if not dry_run:
+            notify_debug(
+                config,
+                title="Lumen: Bandwidth change started",
+                message=f"Change to {profile_bandwidth(result.profile)} has started @ {local_time_str(config)}",
+            )
             record_pending_change(config, state, result, details, source="override")
     else:
         emit("action=apply success=true details=already_on_requested_profile")
@@ -1538,16 +1574,23 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
         if pending_status == "resolved":
             emit("pending_change=false action=resolved")
             completed = state.get("last_completed_change", {})
+            target_bw = completed.get("target_bandwidth", "unknown")
             notify(
                 config,
                 event="recovery",
                 title="Lumen scheduler: bandwidth change confirmed",
-                message=f"Bandwidth successfully changed to {completed.get('target_bandwidth', 'unknown')}.",
+                message=f"Bandwidth successfully changed to {target_bw}.",
                 facts=[
                     {"name": "Profile", "value": completed.get("target_profile", "")},
-                    {"name": "Bandwidth", "value": completed.get("target_bandwidth", "")},
+                    {"name": "Bandwidth", "value": target_bw},
                     {"name": "Source", "value": completed.get("source", "")},
                 ],
+                is_error=False,
+            )
+            notify_debug(
+                config,
+                title="Lumen: Bandwidth change successful",
+                message=f"Change to {target_bw} was successful @ {local_time_str(config)}",
                 is_error=False,
             )
             return 0
@@ -1557,21 +1600,28 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
                 f"target_bandwidth={pending.get('target_bandwidth', '')}",
                 error=True,
             )
+            timeout_bw = pending.get("target_bandwidth", "unknown")
             notify(
                 config,
                 event="pending_timeout",
                 title="Lumen scheduler: pending bandwidth change timed out",
                 message=(
-                    f"A bandwidth change to {pending.get('target_bandwidth', 'unknown')} "
+                    f"A bandwidth change to {timeout_bw} "
                     "was submitted but did not confirm within the timeout window. "
                     "Manual verification may be required."
                 ),
                 facts=[
                     {"name": "Target profile", "value": pending.get("target_profile", "")},
-                    {"name": "Target bandwidth", "value": pending.get("target_bandwidth", "")},
+                    {"name": "Target bandwidth", "value": timeout_bw},
                     {"name": "Last live status", "value": pending.get("last_live_status", "unknown")},
                     {"name": "Last live bandwidth", "value": pending.get("last_live_bandwidth", "unknown")},
                 ],
+            )
+            notify_debug(
+                config,
+                title="Lumen: Bandwidth change failed",
+                message=f"Change to {timeout_bw} failed: timed out @ {local_time_str(config)}",
+                is_error=True,
             )
             return 2
         emit(
@@ -1653,22 +1703,34 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
     if ok:
         emit(f"action=apply success=true details={details}")
         if not dry_run:
+            notify_debug(
+                config,
+                title="Lumen: Bandwidth change started",
+                message=f"Change to {profile_bandwidth(result.profile)} has started @ {local_time_str(config)}",
+            )
             record_pending_change(config, state, result, details, source="schedule")
             save_json(state_path, state)
         return 0
 
     emit(f"action=apply success=false details={details}", error=True)
     if not dry_run:
+        safe_details = redact_sensitive_text(details)
         notify(
             config,
             event="apply_failure",
             title="Lumen scheduler: bandwidth change failed",
-            message=redact_sensitive_text(details),
+            message=safe_details,
             facts=[
                 {"name": "Profile", "value": result.profile_name},
                 {"name": "Rule", "value": result.rule_name},
                 {"name": "Bandwidth", "value": profile_bandwidth(result.profile)},
             ],
+        )
+        notify_debug(
+            config,
+            title="Lumen: Bandwidth change failed",
+            message=f"Change to {profile_bandwidth(result.profile)} failed: {safe_details} @ {local_time_str(config)}",
+            is_error=True,
         )
         state.update(
             {
