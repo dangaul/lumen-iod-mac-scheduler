@@ -359,53 +359,77 @@ Run this before committing or deploying an update. The install script also runs 
 
 ## Packaging / Deploying to Another Mac
 
-The target machine does not need git or any account login. Transfer a zip built on your dev machine.
+The target machine does not need git or any account login.
 
-**Build the zip:**
+**Build:**
 
 ```bash
-./create_portable_zip.sh
+bash create_portable_zip.sh
 ```
 
-This creates `./dist/lumen-scheduler-macos-<timestamp>.zip` containing:
-- `lumen_scheduler.py`, `dashboard.py`, `test_lumen_scheduler.py`
-- `install_macos.sh`, `launch_web_page.sh`, `stop_web_page.sh`, `restart_web_page.sh`
-- `config.example.json`, `.env.example`, `README.md`
+This produces two files in `./dist/`:
 
-It excludes `.env`, `config.json`, logs, state files, and cache — nothing sensitive.
+| File | Purpose |
+|---|---|
+| `lumen-scheduler-macos-<timestamp>.sh` | Self-extracting installer — transfer this single file |
+| `lumen-scheduler-macos-<timestamp>.zip` | Plain zip — attach to a GitHub Release |
+
+Both contain templates only — no `.env`, no `config.json`, no logs or state. Nothing sensitive is bundled.
+
+The `.sh` is a bash script with the zip appended after `exit 0`. When run, it extracts the zip to a temp file using `dd` (offset baked in at build time), unpacks it to the target directory with `unzip`, then runs `install_macos.sh`.
 
 **Transfer options (no Apple ID required):**
 - USB drive
 - AirDrop (works without Apple ID — Discovery set to `Everyone`, same network)
 - Shared network folder
+- Email
 
 **First install on the target Mac:**
 
 ```bash
-unzip lumen-scheduler-macos-*.zip -d lumen-scheduler
-cd lumen-scheduler
-bash install_macos.sh
+bash lumen-scheduler-macos-*.sh
+```
+
+Installs to `~/lumen-scheduler` by default. Pass a path to install elsewhere:
+
+```bash
+bash lumen-scheduler-macos-*.sh /path/to/install/dir
 ```
 
 Then edit `.env` with real credentials and `TEAMS_WEBHOOK_URL`, and update `config.json` with your `service_id`.
 
 **Updating an existing install:**
 
-Unzip the new package into the same folder (overwrites `.py` and `.sh` files) and re-run:
+Run the new installer against the same directory:
 
 ```bash
-bash install_macos.sh
+bash lumen-scheduler-macos-*.sh ~/lumen-scheduler
 ```
 
-The installer will not overwrite an existing `.env` or `config.json`. It will warn about any new config sections or env variables that need to be added manually, for example:
+The installer detects an existing `config.json` and presents an update menu:
+- **Option 1** — Update scripts only, keep existing `config.json` and `.env` (recommended)
+- **Option 2** — Full reinstall from templates (offers to back up existing files first)
+- **Option 3** — Cancel
+
+It will warn about any new config sections or env variables that need to be added manually, for example:
 
 ```
-[install] WARNING: config.json is missing new section(s): notifications
-[install]   See config.example.json for the required structure and add them manually.
+[install] ⚠  config.json is missing new section(s): notifications
+[install]    Add the following to config.json (see config.example.json for full structure):
+  "notifications": { ... }
 
-[install] WARNING: .env is missing new variable(s): TEAMS_WEBHOOK_URL
-[install]   Add them to ./.env before relying on notifications.
+[install] ⚠  .env is missing new variable(s): TEAMS_WEBHOOK_URL
+[install]    Add the following line(s) to .env:
+             TEAMS_WEBHOOK_URL=
 ```
+
+**Verify the package:**
+
+```bash
+bash test_installer.sh
+```
+
+Checks that the build artifacts are correct, the zip contains the right files (and excludes sensitive ones), the embedded payload offset is valid, and a fresh install completes successfully.
 
 ## Notes
 
