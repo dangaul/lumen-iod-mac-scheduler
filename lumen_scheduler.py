@@ -599,8 +599,17 @@ def is_placeholder_value(value: str) -> bool:
     return not text or text.startswith("${") or text.upper().startswith("YOUR_")
 
 
+_SERVICE_TYPE_MAP = {
+    "internet on-demand": "Internet",
+    "internet": "Internet",
+    "port": "Port",
+}
+
 def inventory_service_type(iod_cfg: dict[str, Any]) -> str:
-    return str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet On-Demand").strip()
+    # Lumen inventory API only accepts serviceType "Internet" or "Port".
+    # Map product_name variants (e.g. "Internet On-Demand") to the correct value.
+    raw = str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet").strip()
+    return _SERVICE_TYPE_MAP.get(raw.lower(), raw)
 
 
 def inventory_urls(base_url: str, iod_cfg: dict[str, Any]) -> list[str]:

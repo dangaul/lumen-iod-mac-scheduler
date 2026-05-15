@@ -63,7 +63,7 @@
     "verify_after_order": false,
     "wait_for_update_minutes": 5,
     "source_system": "NaaS ExternalApi",
-    "product_name": "Internet On-Demand",
+    "product_name": "Internet",
     "customer_price_request_description": "Automated schedule quote request",
     "customer_purchase_order_number": "AUTO-SCHEDULE",
     "master_site_id": "",
