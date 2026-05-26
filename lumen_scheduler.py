@@ -607,8 +607,10 @@ _SERVICE_TYPE_MAP = {
 
 def inventory_service_type(iod_cfg: dict[str, Any]) -> str:
     # Lumen inventory API only accepts serviceType "Internet" or "Port".
-    # Map product_name variants (e.g. "Internet On-Demand") to the correct value.
-    raw = str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet").strip()
+    # Uses dedicated inventory_service_type key if set; otherwise maps product_name.
+    # "Internet On-Demand" → "Internet" since the API rejects the full product name here.
+    # Note: product_name is kept as "Internet On-Demand" for the quote/order payloads.
+    raw = str(iod_cfg.get("inventory_service_type") or iod_cfg.get("product_name") or "Internet On-Demand").strip()
     return _SERVICE_TYPE_MAP.get(raw.lower(), raw)
 
 
