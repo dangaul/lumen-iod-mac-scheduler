@@ -1076,11 +1076,19 @@ def apply_lumen_iod_profile(
             )
             quote_identifier_key = "partnerId"
         else:
+            # Explicit port_service_id in config takes precedence over the
+            # UNI Service ID from inventory. If neither is set, fall back to
+            # the main service_id. The UNI Service ID is tried last because
+            # Lumen's pricing API sometimes cannot resolve portSpeed/deviceCode
+            # from it, resulting in 422 INVALIDVALUE errors.
             quote_identifier = str(iod_cfg.get("port_service_id") or "")
-            for item in inventory_characteristics(inventory):
-                if str(item.get("name", "")).strip().lower() == "uni service id":
-                    quote_identifier = str(item.get("value", "")).strip()
-                    break
+            if not quote_identifier:
+                for item in inventory_characteristics(inventory):
+                    if str(item.get("name", "")).strip().lower() == "uni service id":
+                        quote_identifier = str(item.get("value", "")).strip()
+                        break
+            if not quote_identifier:
+                quote_identifier = service_id
             quote_identifier_key = "serviceId"
 
     if not quote_identifier:
@@ -1607,7 +1615,7 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
             return 0
         if pending_status == "timed_out":
             emit(
-                "pending_change=true action=skip status=timed_out "
+                "pending_change=true action=cleared status=timed_out "
                 f"target_bandwidth={pending.get('target_bandwidth', '')}",
                 error=True,
             )
@@ -1619,7 +1627,7 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
                 message=(
                     f"A bandwidth change to {timeout_bw} "
                     "was submitted but did not confirm within the timeout window. "
-                    "Manual verification may be required."
+                    "Retrying now."
                 ),
                 facts=[
                     {"name": "Target profile", "value": pending.get("target_profile", "")},
@@ -1634,14 +1642,18 @@ def _run_once_inner(config_path: Path, config: dict[str, Any], force: bool, dry_
                 message=f"Change to {timeout_bw} failed: timed out @ {local_time_str(config)}",
                 is_error=True,
             )
-            return 2
-        emit(
-            "pending_change=true action=skip status=pending "
-            f"target_bandwidth={pending.get('target_bandwidth', '')} "
-            f"last_live_status={pending.get('last_live_status', '')} "
-            f"last_live_bandwidth={pending.get('last_live_bandwidth', '')}"
-        )
-        return 0
+            # Auto-clear the stuck pending state so the normal schedule logic
+            # below can resubmit rather than staying blocked indefinitely.
+            state.pop("pending_change", None)
+            save_json(state_path, state)
+        elif isinstance(state.get("pending_change"), dict):
+            emit(
+                "pending_change=true action=skip status=pending "
+                f"target_bandwidth={pending.get('target_bandwidth', '')} "
+                f"last_live_status={pending.get('last_live_status', '')} "
+                f"last_live_bandwidth={pending.get('last_live_bandwidth', '')}"
+            )
+            return 0
 
     if cleanup_expired_override(config, state) and not dry_run:
         save_json(state_path, state)
