@@ -135,7 +135,7 @@ Example output:
 ```
 Found 1 Internet On-Demand service(s):
 
-  service_id: 77133831778  status: Active  bandwidth: 500 Mbps
+  service_id: 12345678901  status: Active  bandwidth: 500 Mbps
 
 Set lumen_iod.service_id in config.json to one of the above.
 ```

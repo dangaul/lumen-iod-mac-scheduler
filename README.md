@@ -112,7 +112,7 @@ Output example:
 ```
 Found 1 Internet On-Demand service(s):
 
-  service_id: 77133831778  status: Active  bandwidth: 500 Mbps
+  service_id: 12345678901  status: Active  bandwidth: 500 Mbps
 
 Set lumen_iod.service_id in config.json to one of the above.
 ```
@@ -356,6 +356,16 @@ python3 -m unittest test_lumen_scheduler.py -v
 ```
 
 Run this before committing or deploying an update. The install script also runs it automatically.
+
+## Security check (public repo)
+
+This repo is public. `security_check.py` blocks commits and pushes that contain secret/state files, any real value from your local `.env` or `config.json` (credentials, service/billing IDs, webhook URL, passphrase), or generic token patterns. Install the git hooks once per clone:
+
+```bash
+python3 security_check.py --install-hooks
+```
+
+Run `python3 security_check.py` for a full scan of the working tree and all history. Use placeholder IDs (e.g. `12345678901`, `5-ABC12345`) in docs and tests.
 
 ## Packaging / Deploying to Another Mac
 

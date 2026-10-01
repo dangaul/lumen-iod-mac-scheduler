@@ -193,7 +193,7 @@ HTML = """<!doctype html>
         <div class="label">Configuration</div>
         <div class="row" style="margin-top:8px">
           <div><label class="small">Timezone</label><select id="cfg_timezone" style="width:100%"></select></div>
-          <div><label class="small">Service ID</label><input id="cfg_service_id" type="text" style="width:100%" placeholder="77133831778" /></div>
+          <div><label class="small">Service ID</label><input id="cfg_service_id" type="text" style="width:100%" placeholder="12345678901" /></div>
           <div><label class="small">Log File</label><input id="cfg_log_file" type="text" style="width:100%" placeholder="./lumen-scheduler.log" /></div>
         </div>
         <div class="row" style="margin-top:8px">
