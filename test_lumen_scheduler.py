@@ -308,5 +308,27 @@ class TestNotify(unittest.TestCase):
         self.assertEqual(args[0], url)
 
 
+class TestStripBillingAccountSuffix(unittest.TestCase):
+    # Lumen's WAF returns HTML 403 on order bodies whose billing name has two
+    # adjacent "(...) (...)" groups; this blocked every change from 2026-09-21.
+
+    def test_strips_trailing_account_id_from_inventory_name(self):
+        name = "ACME CORPORATION (D/B/A EXAMPLE MEDIA GROUP) (5-ABC12345)"
+        self.assertEqual(
+            ls.strip_billing_account_suffix(name, "5-ABC12345"),
+            "ACME CORPORATION (D/B/A EXAMPLE MEDIA GROUP)",
+        )
+
+    def test_leaves_name_without_suffix_unchanged(self):
+        self.assertEqual(ls.strip_billing_account_suffix("ACME (D/B/A FOO)", "5-X"), "ACME (D/B/A FOO)")
+
+    def test_does_not_strip_a_different_parenthetical(self):
+        # Only the account id is redundant; other trailing groups are real name parts.
+        self.assertEqual(ls.strip_billing_account_suffix("ACME (EAST)", "5-X"), "ACME (EAST)")
+
+    def test_empty_account_id_is_noop(self):
+        self.assertEqual(ls.strip_billing_account_suffix("ACME ()", ""), "ACME ()")
+
+
 if __name__ == "__main__":
     unittest.main()

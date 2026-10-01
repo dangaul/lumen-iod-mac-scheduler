@@ -599,6 +599,17 @@ def is_placeholder_value(value: str) -> bool:
     return not text or text.startswith("${") or text.upper().startswith("YOUR_")
 
 
+def strip_billing_account_suffix(name: str, account_id: str) -> str:
+    # Inventory returns names like "ACME (D/B/A FOO) (5-ABC123)". Lumen's
+    # edge WAF rejects order bodies with two adjacent "(...) (...)" groups
+    # (HTML 403), so drop the redundant trailing "(<account id>)".
+    text = str(name or "").strip()
+    suffix = f"({account_id})"
+    if account_id and text.endswith(suffix):
+        text = text[: -len(suffix)].strip()
+    return text
+
+
 _SERVICE_TYPE_MAP = {
     "internet on-demand": "Internet",
     "internet": "Internet",
@@ -1107,10 +1118,13 @@ def apply_lumen_iod_profile(
         iod_cfg.get("billing_account_id")
         or inventory.get("billingAccount", {}).get("id", "")
     ).strip()
-    billing_account_name = str(
-        iod_cfg.get("billing_account_name")
-        or inventory.get("billingAccount", {}).get("name", "")
-    ).strip()
+    billing_account_name = strip_billing_account_suffix(
+        str(
+            iod_cfg.get("billing_account_name")
+            or inventory.get("billingAccount", {}).get("name", "")
+        ),
+        billing_account_id,
+    )
     if dry_run and not billing_account_id:
         billing_account_id = "ACCOUNT_ID"
     if dry_run and not billing_account_name:
