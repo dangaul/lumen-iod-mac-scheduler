@@ -23,7 +23,7 @@ confirm() {
   local reply
   reply="$(prompt "${question} [${default}]: ")"
   reply="${reply:-${default}}"
-  [[ "${reply^^}" == "Y" ]]
+  [[ "${reply}" == [Yy] ]]
 }
 
 # ---------------------------------------------------------------------------

@@ -199,6 +199,25 @@ assert_eq "update mode leaves config.json unchanged" \
   "${ORIG_CONTENT}" "${AFTER_CONTENT}"
 
 # ---------------------------------------------------------------------------
+# confirm() under stock macOS bash 3.2
+# ---------------------------------------------------------------------------
+# Office laptops run the installer with /bin/bash 3.2, not Homebrew bash. The
+# runs above never reach confirm() (no tty), so a bash-4-only construct like
+# ${reply^^} crashed real installs while every test passed. Exercise it directly.
+
+echo ""
+echo "confirm() on /bin/bash ($(/bin/bash -c 'echo $BASH_VERSION'))..."
+CONFIRM_FN="$(sed -n '/^confirm() {/,/^}/p' "${ROOT_DIR}/install_macos.sh")"
+run_confirm() {
+  # $1 = simulated user reply, $2 = default
+  /bin/bash -c "prompt() { echo '$1'; }; ${CONFIRM_FN}; confirm 'Q?' '$2' && echo yes || echo no" 2>&1
+}
+assert_eq "confirm: lowercase y accepted" "yes" "$(run_confirm y n)"
+assert_eq "confirm: empty reply uses default Y" "yes" "$(run_confirm '' Y)"
+assert_eq "confirm: empty reply uses default n" "no" "$(run_confirm '' n)"
+assert_eq "confirm: N rejected" "no" "$(run_confirm N Y)"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
