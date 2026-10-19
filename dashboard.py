@@ -119,8 +119,8 @@ HTML = """<!doctype html>
 	      <div class=\"actions\" style=\"margin-top:8px\">
         <label class=\"small\">Override hours:</label>
         <input id=\"hours\" type=\"number\" min=\"0.25\" step=\"0.25\" value=\"1\" />
-        <button id=\"btn_peak\" class=\"accent\" onclick=\"switchProfile('peak')\" disabled>Switch to On Peak (500 Mbps)</button>
-        <button id=\"btn_off\" class=\"secondary\" onclick=\"switchProfile('off_peak')\" disabled>Switch to Off Peak (100 Mbps)</button>
+        <button id=\"btn_peak\" class=\"accent\" onclick=\"switchProfile('peak')\" disabled>Switch to On Peak</button>
+        <button id=\"btn_off\" class=\"secondary\" onclick=\"switchProfile('off_peak')\" disabled>Switch to Off Peak</button>
         <button id=\"btn_clear\" onclick=\"clearOverride()\" disabled>Clear Override</button>
 	      </div>
         <div class=\"actions\" style=\"margin-top:8px\">
@@ -770,6 +770,13 @@ HTML = """<!doctype html>
     const disableSave = busy || bandwidthOptions.length === 0 || !hasBandwidthChanges();
     if(saveBw2){ saveBw2.disabled = disableSave; }
   }
+  function renderQuickActionLabels(){
+    // Labels come from the saved profiles so they never drift from config.json.
+    const peak = document.getElementById('btn_peak');
+    const off = document.getElementById('btn_off');
+    if(peak){ peak.textContent = 'Switch to On Peak' + (lastBandwidthConfig.peak ? ' (' + lastBandwidthConfig.peak + ')' : ''); }
+    if(off){ off.textContent = 'Switch to Off Peak' + (lastBandwidthConfig.off_peak ? ' (' + lastBandwidthConfig.off_peak + ')' : ''); }
+  }
   function renderBandwidthControls(payload){
 	    const peakSel = document.getElementById('peak_bw');
 	    const offSel = document.getElementById('off_bw');
@@ -785,6 +792,7 @@ HTML = """<!doctype html>
       peak: (payload && payload.peak_bandwidth) || peakSel.value || '',
       off_peak: (payload && payload.off_peak_bandwidth) || offSel.value || ''
     };
+    renderQuickActionLabels();
     const msg = document.getElementById('bw_msg');
     msg.textContent = (payload && payload.source_note) || '';
     msg.className = 'small';
@@ -1094,6 +1102,7 @@ HTML = """<!doctype html>
       msg.className = 'small ' + (res.ok ? 'ok' : 'bad');
       if(res.ok){
         lastBandwidthConfig = { peak, off_peak: off };
+        renderQuickActionLabels();
       }
       if(res.status){
         renderStatus(res.status);
